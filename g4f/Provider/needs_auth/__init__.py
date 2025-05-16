@@ -1,5 +1,6 @@
 from .Anthropic         import Anthropic
 from .BingCreateImages  import BingCreateImages
+from .BlackboxPro       import BlackboxPro
 from .CablyAI           import CablyAI
 from .Cerebras          import Cerebras
 from .CopilotAccount    import CopilotAccount
@@ -13,6 +14,7 @@ from .GeminiPro         import GeminiPro
 from .GigaChat          import GigaChat
 from .GithubCopilot     import GithubCopilot
 from .GlhfChat          import GlhfChat
+from .Grok              import Grok
 from .Groq              import Groq
 from .MetaAI            import MetaAI
 from .MetaAIAccount     import MetaAIAccount
@@ -20,6 +22,7 @@ from .MicrosoftDesigner import MicrosoftDesigner
 from .OpenaiAccount     import OpenaiAccount
 from .OpenaiAPI         import OpenaiAPI
 from .OpenaiChat        import OpenaiChat
+from .OpenRouter        import OpenRouter
 from .PerplexityApi     import PerplexityApi
 from .Reka              import Reka
 from .Replicate         import Replicate

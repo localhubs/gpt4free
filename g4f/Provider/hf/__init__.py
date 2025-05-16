@@ -9,6 +9,7 @@ from ..base_provider import AsyncGeneratorProvider, ProviderModelMixin
 from .HuggingChat import HuggingChat
 from .HuggingFaceAPI import HuggingFaceAPI
 from .HuggingFaceInference import HuggingFaceInference
+from .HuggingFaceMedia import HuggingFaceMedia
 from .models import model_aliases, vision_models, default_vision_model
 from ... import debug
 
@@ -19,7 +20,7 @@ class HuggingFace(AsyncGeneratorProvider, ProviderModelMixin):
     supports_message_history = True
 
     @classmethod
-    def get_models(cls) -> list[str]:
+    def get_models(cls, **kwargs) -> list[str]:
         if not cls.models:
             cls.models = HuggingFaceInference.get_models()
             cls.image_models = HuggingFaceInference.image_models
@@ -36,7 +37,9 @@ class HuggingFace(AsyncGeneratorProvider, ProviderModelMixin):
         messages: Messages,
         **kwargs
     ) -> AsyncResult:
-        if "api_key" not in kwargs and "images" not in kwargs and random.random() >= 0.5:
+        if model in cls.model_aliases:
+            model = cls.model_aliases[model]
+        if "tools" not in kwargs and "media" not in kwargs and random.random() >= 0.5:
             try:
                 is_started = False
                 async for chunk in HuggingFaceInference.create_async_generator(model, messages, **kwargs):
@@ -48,9 +51,15 @@ class HuggingFace(AsyncGeneratorProvider, ProviderModelMixin):
             except Exception as e:
                 if is_started:
                     raise e
-                debug.log(f"Inference failed: {e.__class__.__name__}: {e}")
+                debug.error(f"{cls.__name__} {type(e).__name__}; {e}")
         if not cls.image_models:
             cls.get_models()
+        try:
+            async for chunk in HuggingFaceMedia.create_async_generator(model, messages, **kwargs):
+                yield chunk
+            return
+        except ModelNotSupportedError:
+            pass
         if model in cls.image_models:
             if "api_key" not in kwargs:
                 async for chunk in HuggingChat.create_async_generator(model, messages, **kwargs):

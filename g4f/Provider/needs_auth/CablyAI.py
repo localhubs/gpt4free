@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ...errors import ModelNotSupportedError
+from ...typing import Messages, AsyncResult
 from ..template import OpenaiTemplate
 
 class CablyAI(OpenaiTemplate):
@@ -9,7 +9,7 @@ class CablyAI(OpenaiTemplate):
     api_base = "https://cablyai.com/v1"
 
     working = True
-    needs_auth = False
+    needs_auth = True
     supports_stream = True
     supports_system_message = True
     supports_message_history = True

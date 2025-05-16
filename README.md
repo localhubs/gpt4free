@@ -30,6 +30,8 @@ docker pull hlohaus789/g4f
 
 ## 🆕 What's New
 
+![1000032415](https://github.com/user-attachments/assets/4caab977-eb05-48ed-b750-3ad082bcfcae)
+
 - **Explore the latest features and updates**  
   Find comprehensive details on our [Releases Page](https://github.com/xtekky/gpt4free/releases).  
 
@@ -42,19 +44,16 @@ docker pull hlohaus789/g4f
 - **Get support in our Discord Community** 🤝💻  
   Reach out for help in our [Support Group: discord.gg/qXA4Wf4Fsm](https://discord.gg/qXA4Wf4Fsm).
 
+- **Read our Documentation** 📖  
+  Find detailed guidance and resources at [gpt4free.github.io/docs](https://github.com/gpt4free/gpt4free.github.io).
+
 ## 🔻 Site Takedown
 
 Is your site on this repository and you want to take it down? Send an email to takedown@g4f.ai with proof it is yours and it will be removed as fast as possible. To prevent reproduction please secure your API. 😉
 
-## 🚀 GPT4Free on HuggingFace
-[![HuggingSpace](https://github.com/user-attachments/assets/1d859e8a-d6fa-416f-a213-ccc26aa11e90)](https://huggingface.co/spaces/roxky/g4f-space)
-**Is a proof-of-concept API package for multi-provider AI requests. It showcases features such as:**
+## 🚀 G4F on GitHub Pages [![HuggingSpace](https://github.com/user-attachments/assets/1d859e8a-d6fa-416f-a213-ccc26aa11e90)](https://gpt4free.github.io/)
 
-- Load balancing and request flow control.
-- Seamless integration with multiple AI providers.
-- Comprehensive text and image generation support.
-
-> Explore the [Visit GPT4Free on HuggingFace Space](https://huggingface.co/spaces/roxky/g4f-space) for a hosted version or [Duplicate GPT4Free Space](https://huggingface.co/spaces/roxky/g4f-space?duplicate=true) it for personal use.
+> Explore the [G4F on GitHub Pages](https://gpt4free.github.io/).
 
 ---
 
@@ -70,12 +69,12 @@ Is your site on this repository and you want to take it down? Send an email to t
      - [📝 Text Generation](#-text-generation)
      - [🎨 Image Generation](#-image-generation)
      - [🌐 Web Interface](#-web-interface)
-     - [🖥️ Local Inference](docs/local.md)
+     - [🖥️ Local Inference](https://github.com/gpt4free/gpt4free.github.io/blob/main/docs/local.md)
      - [🤖 Interference API](#-interference-api)
-     - [🛠️ Configuration](docs/configuration.md)
+     - [🛠️ Configuration](https://github.com/gpt4free/gpt4free.github.io/blob/main/docs/configuration.md)
      - [📱 Run on Smartphone](#-run-on-smartphone)
      - [📘 Full Documentation for Python API](#-full-documentation-for-python-api)
-  - [🚀 Providers and Models](docs/providers-and-models.md)
+  - [🚀 Providers and Models](https://github.com/gpt4free/gpt4free.github.io/blob/main/docs%2Fproviders-and-models.md)
   - [🔗 Powered by gpt4free](#-powered-by-gpt4free)
   - [🤝 Contribute](#-contribute)
      - [How do i create a new Provider?](#guide-how-do-i-create-a-new-provider)
@@ -95,31 +94,29 @@ Is your site on this repository and you want to take it down? Send an email to t
 1. **Install Docker:** [Download and install Docker](https://docs.docker.com/get-docker/).
 2. **Set Up Directories:** Before running the container, make sure the necessary data directories exist or can be created. For example, you can create and set ownership on these directories by running: 
 ```bash
-   mkdir -p ${PWD}/har_and_cookies ${PWD}/generated_images
-   sudo chown -R 1200:1201 ${PWD}/har_and_cookies ${PWD}/generated_images
+mkdir -p ${PWD}/har_and_cookies ${PWD}/generated_media
+sudo chown -R 1200:1201 ${PWD}/har_and_cookies ${PWD}/generated_media
 ```
 3. **Run the Docker Container:** Use the following commands to pull the latest image and start the container (Only x64):
 ```bash
-   docker pull hlohaus789/g4f
-   docker run -p 8080:8080 -p 7900:7900 \
-     --shm-size="2g" \
-     -v ${PWD}/har_and_cookies:/app/har_and_cookies \
-     -v ${PWD}/generated_images:/app/generated_images \
-     hlohaus789/g4f:latest
+docker pull hlohaus789/g4f
+docker run -p 8080:8080 -p 7900:7900 \
+  --shm-size="2g" \
+  -v ${PWD}/har_and_cookies:/app/har_and_cookies \
+  -v ${PWD}/generated_media:/app/generated_media \
+  hlohaus789/g4f:latest
 ```
 
 4. **Running the Slim Docker Image:** And use the following commands to run the Slim Docker image. This command also updates the `g4f` package at startup and installs any additional dependencies: (x64 and arm64)
 ```bash
-  mkdir -p ${PWD}/har_and_cookies ${PWD}/generated_images
-  chown -R 1000:1000 ${PWD}/har_and_cookies ${PWD}/generated_images
-	docker run \
-	  -p 1337:1337 \
-	  -v ${PWD}/har_and_cookies:/app/har_and_cookies \
-	  -v ${PWD}/generated_images:/app/generated_images \
-	  hlohaus789/g4f:latest-slim \
-	  rm -r -f /app/g4f/ \
-	  && pip install -U g4f[slim] \
-	  && python -m g4f --debug
+mkdir -p ${PWD}/har_and_cookies ${PWD}/generated_media
+chown -R 1000:1000 ${PWD}/har_and_cookies ${PWD}/generated_media
+docker run \
+  -p 1337:1337 \
+  -v ${PWD}/har_and_cookies:/app/har_and_cookies \
+  -v ${PWD}/generated_media:/app/generated_media \
+  hlohaus789/g4f:latest-slim \
+  /bin/sh -c 'rm -rf /app/g4f && pip install -U g4f[slim] && python -m g4f --debug'
 ```
  
 5. **Access the Client Interface:**
@@ -155,7 +152,7 @@ By following these steps, you should be able to successfully install and run the
 pip install -U g4f[all]
 ```
 
-> How do I install only parts or do disable parts? **Use partial requirements:** [/docs/requirements](docs/requirements.md)
+> How do I install only parts or do disable parts? **Use partial requirements:** [/docs/requirements](https://github.com/gpt4free/gpt4free.github.io/blob/main/docs/requirements.md)
 
 #### Install from Source:
 ```bash
@@ -164,7 +161,7 @@ cd gpt4free
 pip install -r requirements.txt
 ```
 
-> How do I load the project using git and installing the project requirements? **Read this tutorial and follow it step by step:** [/docs/git](docs/git.md)
+> How do I load the project using git and installing the project requirements? **Read this tutorial and follow it step by step:** [/docs/git](https://github.com/gpt4free/gpt4free.github.io/blob/main/docs/git.md)
 
 ---
 
@@ -199,7 +196,7 @@ response = client.images.generate(
 
 print(f"Generated image URL: {response.data[0].url}")
 ```
-[![Image with cat](/docs/images/cat.jpeg)](docs/client.md)
+[![Image with cat](https://gpt4free.github.io/docs/images/cat.jpeg)](https://github.com/gpt4free/gpt4free.github.io/blob/main/docs/client.md)
 
 ### 🌐 Web Interface
 **Run the GUI using Python:**
@@ -217,7 +214,7 @@ python -m g4f.cli gui --port 8080 --debug
 python -m g4f --port 8080 --debug
 ```
 
-> **Learn More About the GUI:** For detailed instructions on how to set up, configure, and use the GPT4Free GUI, refer to the [GUI Documentation](docs/gui.md) . This guide includes step-by-step details on provider selection, managing conversations, using advanced features like speech recognition, and more.
+> **Learn More About the GUI:** For detailed instructions on how to set up, configure, and use the GPT4Free GUI, refer to the [GUI Documentation](https://github.com/gpt4free/gpt4free.github.io/blob/main/docs/gui.md) . This guide includes step-by-step details on provider selection, managing conversations, using advanced features like speech recognition, and more.
 
 ---
 
@@ -225,27 +222,29 @@ python -m g4f --port 8080 --debug
 
 The **Interference API** enables seamless integration with OpenAI's services through G4F, allowing you to deploy efficient AI solutions.
 
-- **Documentation**: [Interference API Docs](docs/interference-api.md)
+- **Documentation**: [Interference API Docs](https://github.com/gpt4free/gpt4free.github.io/blob/main/docs/interference-api.md)
 - **Endpoint**: `http://localhost:1337/v1`
 - **Swagger UI**: Explore the OpenAPI documentation via Swagger UI at `http://localhost:1337/docs`
-- **Provider Selection**: [How to Specify a Provider?](docs/selecting_a_provider.md)
+- **Provider Selection**: [How to Specify a Provider?](https://github.com/gpt4free/gpt4free.github.io/blob/main/docs/selecting_a_provider.md)
 
 This API is designed for straightforward implementation and enhanced compatibility with other OpenAI integrations.
 
 ---
 
 ### 📱 Run on Smartphone
-Run the Web UI on your smartphone for easy access on the go. Check out the dedicated guide to learn how to set up and use the GUI on your mobile device: [Run on Smartphone Guide](docs/guides/phone.md)
+Run the Web UI on your smartphone for easy access on the go. Check out the dedicated guide to learn how to set up and use the GUI on your mobile device: [Run on Smartphone Guide](https://github.com/gpt4free/gpt4free.github.io/blob/main/docs/guides/phone.md)
 
 ---
 
 #### **📘 Full Documentation for Python API**
-   - **Client API from G4F:** [/docs/client](docs/client.md)
-   - **AsyncClient API from G4F:** [/docs/async_client](docs/async_client.md)
-   - **Requests API from G4F:** [/docs/requests](docs/requests.md)
-   - **File API from G4F:** [/docs/file](docs/file.md)
-   - **Legacy API with python modules:** [/docs/legacy](docs/legacy.md)
-      
+   - **Client API from G4F:** [/docs/client](https://github.com/gpt4free/gpt4free.github.io/blob/main/docs/client.md)
+   - **AsyncClient API from G4F:** [/docs/async_client](https://github.com/gpt4free/gpt4free.github.io/blob/main/docs/async_client.md)
+   - **Requests API from G4F:** [/docs/requests](https://github.com/gpt4free/gpt4free.github.io/blob/main/docs/requests.md)
+   - **File API from G4F:** [/docs/file](https://github.com/gpt4free/gpt4free.github.io/blob/main/docs/file.md)
+   - **PydanticAI and LangChain Integration for G4F:** [/docs/pydantic_ai](https://github.com/gpt4free/gpt4free.github.io/blob/main/docs/pydantic_ai.md)
+   - **Legacy API with python modules:** [/docs/legacy](https://github.com/gpt4free/gpt4free.github.io/blob/main/docs/legacy.md)
+   - **G4F - Media Documentation** [/docs/media](https://github.com/gpt4free/gpt4free.github.io/media.md) *(New)*
+
 ---
 
 ## 🔗 Powered by gpt4free
@@ -712,10 +711,10 @@ Run the Web UI on your smartphone for easy access on the go. Check out the dedic
 We welcome contributions from the community. Whether you're adding new providers or features, or simply fixing typos and making small improvements, your input is valued. Creating a pull request is all it takes – our co-pilot will handle the code review process. Once all changes have been addressed, we'll merge the pull request into the main branch and release the updates at a later time.
 
 ###### Guide: How do i create a new Provider?
-   - **Read:** [Create Provider Guide](docs/guides/create_provider.md)
+   - **Read:** [Create Provider Guide](https://github.com/gpt4free/gpt4free.github.io/blob/main/docs/guides/create_provider.md)
 
 ###### Guide: How can AI help me with writing code?
-   - **Read:** [AI Assistance Guide](docs/guides/help_me.md)
+   - **Read:** [AI Assistance Guide](https://github.com/gpt4free/gpt4free.github.io/blob/main/docs/guides/help_me.md)
 
 
 
@@ -835,6 +834,7 @@ A list of all contributors is available [here](https://github.com/xtekky/gpt4fre
 - The [`Gemini.py`](https://github.com/xtekky/gpt4free/blob/main/g4f/Provider/needs_auth/Gemini.py) has input from [dsdanielpark/Gemini-API](https://github.com/dsdanielpark/Gemini-API)
 - The [`MetaAI.py`](https://github.com/xtekky/gpt4free/blob/main/g4f/Provider/MetaAI.py) file contains code from [meta-ai-api](https://github.com/Strvm/meta-ai-api) by [@Strvm](https://github.com/Strvm)
 - The [`proofofwork.py`](https://github.com/xtekky/gpt4free/blob/main/g4f/Provider/openai/proofofwork.py) has input from [missuo/FreeGPT35](https://github.com/missuo/FreeGPT35)
+- The [`Gemini.py`](https://github.com/xtekky/gpt4free/blob/main/g4f/Provider/needs_auth/Gemini.py) has input from [HanaokaYuzu/Gemini-API](https://github.com/HanaokaYuzu/Gemini-API)
 
 _Having input implies that the AI's code generation utilized it as one of many sources._
 
@@ -863,17 +863,16 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 ## ⭐ Star History
 
-<a href="https://github.com/xtekky/gpt4free/stargazers">
-        <img width="500" alt="Star History Chart" src="https://api.star-history.com/svg?repos=xtekky/gpt4free&type=Date">
-</a>
+<!--![Star History Chart](https://api.star-history.com/svg?repos=xtekky/gpt4free&type=Date)-->
 
+<img src="https://github.com/user-attachments/assets/1624121d-4ee1-4553-913e-00dbd937e61f" width="800" alt="Star History Chart">
 
 ## 📄 License
 
 <table>
   <tr>
      <td>
-       <p align="center"> <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/9/93/GPLv3_Logo.svg/1200px-GPLv3_Logo.svg.png" width="80%"></img>
+       <p align="center"> <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/9/93/GPLv3_Logo.svg/1200px-GPLv3_Logo.svg.png" width="120"></img>
     </td>
     <td> 
       <img src="https://img.shields.io/badge/License-GNU_GPL_v3.0-red.svg"/> <br> 
@@ -885,4 +884,3 @@ This project is licensed under <a href="https://github.com/xtekky/gpt4free/blob/
 ---
 
 <p align="right">(<a href="#top">🔼 Back to top</a>)</p>
-

@@ -6,6 +6,7 @@ import io
 import base64
 from io import BytesIO
 from pathlib import Path
+from typing import Optional
 try:
     from PIL.Image import open as open_image, new as new_image
     from PIL.Image import FLIP_LEFT_RIGHT, ROTATE_180, ROTATE_270, ROTATE_90
@@ -16,14 +17,27 @@ except ImportError:
 from ..typing import ImageType, Union, Image
 from ..errors import MissingRequirementsError
 
-ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'}
-
 EXTENSIONS_MAP: dict[str, str] = {
-    "image/png": "png",
-    "image/jpeg": "jpg",
-    "image/gif": "gif",
-    "image/webp": "webp",
+    # Image
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "gif": "image/gif",
+    "webp": "image/webp",
+    # Audio
+    "wav": "audio/wav",
+    "mp3": "audio/mpeg",
+    "flac": "audio/flac",
+    "opus": "audio/opus",
+    "ogg": "audio/ogg",
+    "m4a": "audio/m4a",
+     # Video
+    "mkv": "video/x-matroska",
+    "webm": "video/webm",
+    "mp4": "video/mp4",
 }
+
+MEDIA_TYPE_MAP: dict[str, str] = {value: key for key, value in EXTENSIONS_MAP.items()}
 
 def to_image(image: ImageType, is_svg: bool = False) -> Image:
     """
@@ -63,7 +77,13 @@ def to_image(image: ImageType, is_svg: bool = False) -> Image:
 
     return image
 
-def is_allowed_extension(filename: str) -> bool:
+def get_extension(filename: str) -> Optional[str]:
+    if '.' in filename:
+        ext = os.path.splitext(filename)[1].lower().lstrip('.')
+        return ext if ext in EXTENSIONS_MAP else None
+    return None
+
+def is_allowed_extension(filename: str) -> Optional[str]:
     """
     Checks if the given filename has an allowed extension.
 
@@ -73,8 +93,30 @@ def is_allowed_extension(filename: str) -> bool:
     Returns:
         bool: True if the extension is allowed, False otherwise.
     """
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+    extension = get_extension(filename)
+    if extension is None:
+        return None
+    return EXTENSIONS_MAP[extension]
+
+def is_data_an_media(data, filename: str = None) -> str:
+    content_type = is_data_an_audio(data, filename)
+    if content_type is not None:
+        return content_type
+    if isinstance(data, bytes):
+        return is_accepted_format(data)
+    return is_data_uri_an_image(data)
+
+def is_data_an_audio(data_uri: str = None, filename: str = None) -> str:
+    if filename:
+        extension = get_extension(filename)
+        if extension is not None:
+            media_type = EXTENSIONS_MAP[extension]
+            if media_type.startswith("audio/"):
+                return media_type
+    if isinstance(data_uri, str):
+        audio_format = re.match(r'^data:(audio/\w+);base64,', data_uri)
+        if audio_format:
+            return audio_format.group(1)
 
 def is_data_uri_an_image(data_uri: str) -> bool:
     """
@@ -92,7 +134,7 @@ def is_data_uri_an_image(data_uri: str) -> bool:
     # Extract the image format from the data URI
     image_format = re.match(r'data:image/(\w+);base64,', data_uri).group(1).lower()
     # Check if the image format is one of the allowed formats (jpg, jpeg, png, gif)
-    if image_format not in ALLOWED_EXTENSIONS and image_format != "svg+xml":
+    if image_format not in EXTENSIONS_MAP and image_format != "svg+xml":
         raise ValueError("Invalid image format (from mime file type).")
 
 def is_accepted_format(binary_data: bytes) -> str:
@@ -199,7 +241,7 @@ def to_bytes(image: ImageType) -> bytes:
     if isinstance(image, bytes):
         return image
     elif isinstance(image, str) and image.startswith("data:"):
-        is_data_uri_an_image(image)
+        is_data_an_media(image)
         return extract_data_uri(image)
     elif isinstance(image, Image):
         bytes_io = BytesIO()
@@ -217,12 +259,53 @@ def to_bytes(image: ImageType) -> bytes:
             pass
         return image.read()
 
-def to_data_uri(image: ImageType) -> str:
+def to_data_uri(image: ImageType, filename: str = None) -> str:
     if not isinstance(image, str):
         data = to_bytes(image)
         data_base64 = base64.b64encode(data).decode()
-        return f"data:{is_accepted_format(data)};base64,{data_base64}"
+        return f"data:{is_data_an_media(data, filename)};base64,{data_base64}"
     return image
+
+def to_input_audio(audio: ImageType, filename: str = None) -> str:
+    if not isinstance(audio, str):
+        if filename is not None:
+            format = get_extension(filename)
+            if format is None:
+                raise ValueError("Invalid input audio")
+            return {
+                "data": base64.b64encode(to_bytes(audio)).decode(),
+                "format": format
+            }
+        raise ValueError("Invalid input audio")
+    audio = re.match(r'^data:audio/(\w+);base64,(.+?)', audio)
+    if audio:
+        return {
+            "data": audio.group(2),
+            "format": audio.group(1).replace("mpeg", "mp3")
+        }
+    raise ValueError("Invalid input audio")
+
+def use_aspect_ratio(extra_body: dict, aspect_ratio: str) -> Image:
+    extra_body = {key: value for key, value in extra_body.items() if value is not None}
+    if aspect_ratio == "1:1":
+        extra_body = {
+            "width": 1024,
+            "height": 1024,
+            **extra_body
+        }
+    elif aspect_ratio == "16:9":
+        extra_body = {
+            "width": 832,
+            "height": 480,
+            **extra_body
+        }
+    elif aspect_ratio == "9:16":
+        extra_body = {
+            "width": 480,
+            "height": 832,
+            **extra_body
+        }
+    return extra_body
 
 class ImageDataResponse():
     def __init__(

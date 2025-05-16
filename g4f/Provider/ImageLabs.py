@@ -18,11 +18,10 @@ class ImageLabs(AsyncGeneratorProvider, ProviderModelMixin):
     supports_system_message = False
     supports_message_history = False
     
-    default_model = 'general'
+    default_model = 'sdxl-turbo'
     default_image_model = default_model
     image_models = [default_image_model]
     models = image_models
-    model_aliases = {"sdxl-turbo": default_model}
 
     @classmethod
     async def create_async_generator(
@@ -79,7 +78,7 @@ class ImageLabs(AsyncGeneratorProvider, ProviderModelMixin):
                     if progress_data.get('status') == 'Done' or progress_data.get('final_image_url'):
                         # Yield ImageResponse with the final image URL
                         yield ImageResponse(
-                            images=[progress_data.get('final_image_url')], 
+                            urls=[progress_data.get('final_image_url')], 
                             alt=prompt
                         )
                         break

@@ -1,21 +1,20 @@
 from __future__ import annotations
 
+import re
 import os
 import json
 from pathlib import Path
 from typing import Iterator, Optional, AsyncIterator
 from aiohttp import ClientSession, ClientError, ClientResponse, ClientTimeout
 import urllib.parse
+from urllib.parse import unquote
 import time
 import zipfile
 import asyncio
 import hashlib
 import base64
-
-try:
-    from werkzeug.utils import secure_filename
-except ImportError:
-    secure_filename = os.path.basename
+import tempfile
+import shutil
 
 try:
     import PyPDF2
@@ -73,15 +72,29 @@ except ImportError:
 
 from .web_search import scrape_text
 from ..cookies import get_cookies_dir
+from ..image import is_allowed_extension
 from ..requests.aiohttp import get_connector
 from ..providers.asyncio import to_sync_generator
 from ..errors import MissingRequirementsError
 from .. import debug
 
-PLAIN_FILE_EXTENSIONS = ["txt", "xml", "json", "js", "har", "sh", "py", "php", "css", "yaml", "sql", "log", "csv", "twig", "md"]
+PLAIN_FILE_EXTENSIONS = ["txt", "xml", "json", "js", "har", "sh", "py", "php", "css", "yaml", "sql", "log", "csv", "twig", "md", "arc"]
 PLAIN_CACHE = "plain.cache"
 DOWNLOADS_FILE = "downloads.json"
 FILE_LIST = "files.txt"
+
+def secure_filename(filename: str) -> str:
+    if filename is None:
+        return None
+    # Keep letters, numbers, basic punctuation and all Unicode chars
+    filename = re.sub(
+        r'[^\w.,_+-]+',
+        '_', 
+        unquote(filename).strip(), 
+        flags=re.UNICODE
+    )
+    filename = filename[:100].strip(".,_-+")
+    return filename
 
 def supports_filename(filename: str):
     if filename.endswith(".pdf"):
@@ -118,15 +131,14 @@ def supports_filename(filename: str):
             return True
     return False
 
-def get_bucket_dir(bucket_id: str):
-    bucket_dir = os.path.join(get_cookies_dir(), "buckets", bucket_id)
-    return bucket_dir
+def get_bucket_dir(*parts):
+    return os.path.join(get_cookies_dir(), "buckets", *[secure_filename(part) for part in parts if part])
 
 def get_buckets():
     buckets_dir = os.path.join(get_cookies_dir(), "buckets")
     try:
         return [d for d in os.listdir(buckets_dir) if os.path.isdir(os.path.join(buckets_dir, d))]
-    except OSError as e:
+    except OSError:
         return None
 
 def spacy_refine_chunks(source_iterator):
@@ -157,7 +169,7 @@ def get_filenames(bucket_dir: Path):
 def stream_read_files(bucket_dir: Path, filenames: list, delete_files: bool = False) -> Iterator[str]:
     for filename in filenames:
         file_path: Path = bucket_dir / filename
-        if not file_path.exists() and 0 > file_path.lstat().st_size:
+        if not file_path.exists() or file_path.lstat().st_size <= 0:
             continue
         extension = os.path.splitext(filename)[1][1:]
         if filename.endswith(".zip"):
@@ -177,7 +189,7 @@ def stream_read_files(bucket_dir: Path, filenames: list, delete_files: bool = Fa
                                 else:
                                     os.unlink(filepath)
             continue
-        yield f"```{filename}\n"        
+        yield f"```{filename}\n"
         if has_pypdf2 and filename.endswith(".pdf"):
             try:
                 reader = PyPDF2.PdfReader(file_path)
@@ -253,15 +265,15 @@ def read_bucket(bucket_dir: Path):
     bucket_dir = Path(bucket_dir)
     cache_file = bucket_dir / PLAIN_CACHE
     spacy_file = bucket_dir / f"spacy_0001.cache"
-    if not spacy_file.exists():
-        yield cache_file.read_text()
+    if not spacy_file.is_file() and cache_file.is_file():
+        yield cache_file.read_text(errors="replace")
     for idx in range(1, 1000):
         spacy_file = bucket_dir / f"spacy_{idx:04d}.cache"
         plain_file = bucket_dir / f"plain_{idx:04d}.cache"
-        if spacy_file.exists():
-            yield spacy_file.read_text()
-        elif plain_file.exists():
-            yield plain_file.read_text()
+        if spacy_file.is_file():
+            yield spacy_file.read_text(errors="replace")
+        elif plain_file.is_file():
+            yield plain_file.read_text(errors="replace")
         else:
             break
 
@@ -277,7 +289,7 @@ def stream_read_parts_and_refine(bucket_dir: Path, delete_files: bool = False) -
         cache_file = Path(bucket_dir) / f"spacy_{idx:04d}.cache"
         if cache_file.exists():
             with open(cache_file, "r") as f:
-                yield f.read()
+                yield f.read(errors="replace")
             continue
         if not part.exists():
             break
@@ -416,7 +428,7 @@ def read_links(html: str, base: str) -> set[str]:
 async def download_urls(
     bucket_dir: Path,
     urls: list[str],
-    max_depth: int = 1,
+    max_depth: int = 0,
     loading_urls: set[str] = set(),
     lock: asyncio.Lock = None,
     delay: int = 3,
@@ -439,7 +451,7 @@ async def download_urls(
                     if not filename:
                         print(f"Failed to get filename for {url}")
                         return None
-                    if not supports_filename(filename) or filename == DOWNLOADS_FILE:
+                    if not is_allowed_extension(filename) and not supports_filename(filename) or filename == DOWNLOADS_FILE:
                         return None
                     if filename.endswith(".html") and max_depth > 0:
                         add_urls = read_links(await response.text(), str(response.url))
@@ -448,11 +460,17 @@ async def download_urls(
                                 add_urls = [add_url for add_url in add_urls if add_url not in loading_urls]
                                 [loading_urls.add(add_url) for add_url in add_urls]
                                 [new_urls.append(add_url) for add_url in add_urls if add_url not in new_urls]
-                    target = bucket_dir / filename
+                    if is_allowed_extension(filename):
+                        target = bucket_dir / "media" / filename
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                    else:
+                        target = bucket_dir / filename
                     with target.open("wb") as f:
-                        async for chunk in response.content.iter_chunked(4096):
-                            if b'<link rel="canonical"' not in chunk:
+                        async for chunk in response.content.iter_any():
+                            if filename.endswith(".html") and b'<link rel="canonical"' not in chunk:
                                 f.write(chunk.replace(b'</head>', f'<link rel="canonical" href="{response.url}">\n</head>'.encode()))
+                            else:
+                                f.write(chunk)
                     return filename
             except (ClientError, asyncio.TimeoutError) as e:
                 debug.log(f"Download failed: {e.__class__.__name__}: {e}")
@@ -485,8 +503,8 @@ def get_downloads_urls(bucket_dir: Path, delete_files: bool = False) -> Iterator
                 elif "urls" in item:
                     yield item
 
-def read_and_download_urls(bucket_dir: Path, event_stream: bool = False) -> Iterator[str]:
-    urls = get_downloads_urls(bucket_dir)
+def read_and_download_urls(bucket_dir: Path, delete_files: bool = False, event_stream: bool = False) -> Iterator[str]:
+    urls = get_downloads_urls(bucket_dir, delete_files)
     if urls:
         count = 0
         with open(os.path.join(bucket_dir, FILE_LIST), 'a') as f:
@@ -497,23 +515,24 @@ def read_and_download_urls(bucket_dir: Path, event_stream: bool = False) -> Iter
                         count += 1
                         yield f'data: {json.dumps({"action": "download", "count": count})}\n\n'
 
-async def async_read_and_download_urls(bucket_dir: Path, event_stream: bool = False) -> AsyncIterator[str]:
-    urls = get_downloads_urls(bucket_dir)
+async def async_read_and_download_urls(bucket_dir: Path, delete_files: bool = False, event_stream: bool = False) -> AsyncIterator[str]:
+    urls = get_downloads_urls(bucket_dir, delete_files)
     if urls:
         count = 0
         with open(os.path.join(bucket_dir, FILE_LIST), 'a') as f:
-            async for filename in download_urls(bucket_dir, urls):
-                f.write(f"{filename}\n")
-                if event_stream:
-                    count += 1
-                    yield f'data: {json.dumps({"action": "download", "count": count})}\n\n'
+            for url in urls:
+                async for filename in download_urls(bucket_dir, **url):
+                    f.write(f"{filename}\n")
+                    if event_stream:
+                        count += 1
+                        yield f'data: {json.dumps({"action": "download", "count": count})}\n\n'
 
 def stream_chunks(bucket_dir: Path, delete_files: bool = False, refine_chunks_with_spacy: bool = False, event_stream: bool = False) -> Iterator[str]:
     size = 0
     if refine_chunks_with_spacy:
         for chunk in stream_read_parts_and_refine(bucket_dir, delete_files):
             if event_stream:
-                size += len(chunk)
+                size += len(chunk.encode())
                 yield f'data: {json.dumps({"action": "refine", "size": size})}\n\n'
             else:
                 yield chunk
@@ -522,14 +541,16 @@ def stream_chunks(bucket_dir: Path, delete_files: bool = False, refine_chunks_wi
         streaming = cache_stream(streaming, bucket_dir)
         for chunk in streaming:
             if event_stream:
-                size += len(chunk)
+                size += len(chunk.encode())
                 yield f'data: {json.dumps({"action": "load", "size": size})}\n\n'
             else:
                 yield chunk
         files_txt = os.path.join(bucket_dir, FILE_LIST)
-        if delete_files and os.path.exists(files_txt):
+        if os.path.exists(files_txt):
             for filename in get_filenames(bucket_dir):
-                if os.path.exists(os.path.join(bucket_dir, filename)):
+                if is_allowed_extension(filename):
+                    yield f'data: {json.dumps({"action": "media", "filename": filename})}\n\n'
+                if delete_files and os.path.exists(os.path.join(bucket_dir, filename)):
                     os.remove(os.path.join(bucket_dir, filename))
             os.remove(files_txt)
             if event_stream:
@@ -541,7 +562,7 @@ def get_streaming(bucket_dir: str, delete_files = False, refine_chunks_with_spac
     bucket_dir = Path(bucket_dir)
     bucket_dir.mkdir(parents=True, exist_ok=True)
     try:
-        yield from read_and_download_urls(bucket_dir, event_stream)
+        yield from read_and_download_urls(bucket_dir, delete_files, event_stream)
         yield from stream_chunks(bucket_dir, delete_files, refine_chunks_with_spacy, event_stream)
     except Exception as e:
         if event_stream:
@@ -552,7 +573,7 @@ async def get_async_streaming(bucket_dir: str, delete_files = False, refine_chun
     bucket_dir = Path(bucket_dir)
     bucket_dir.mkdir(parents=True, exist_ok=True)
     try:
-        async for chunk in async_read_and_download_urls(bucket_dir, event_stream):
+        async for chunk in async_read_and_download_urls(bucket_dir, delete_files, event_stream):
             yield chunk
         for chunk in stream_chunks(bucket_dir, delete_files, refine_chunks_with_spacy, event_stream):
             yield chunk
@@ -560,3 +581,10 @@ async def get_async_streaming(bucket_dir: str, delete_files = False, refine_chun
         if event_stream:
             yield f'data: {json.dumps({"error": {"message": str(e)}})}\n\n'
         raise e
+
+def get_tempfile(file, suffix):
+    copyfile = tempfile.NamedTemporaryFile(suffix=os.path.splitext(suffix)[-1], delete=False)
+    shutil.copyfileobj(file, copyfile)
+    copyfile.close()
+    file.close()
+    return copyfile.name

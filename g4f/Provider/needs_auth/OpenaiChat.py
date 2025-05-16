@@ -8,7 +8,7 @@ import json
 import base64
 import time
 import random
-from typing import AsyncIterator, Iterator, Optional, Generator, Dict, List
+from typing import AsyncIterator, Iterator, Optional, Generator, Dict, Union
 from copy import copy
 
 try:
@@ -18,15 +18,16 @@ except ImportError:
     has_nodriver = False
 
 from ..base_provider import AsyncAuthedProvider, ProviderModelMixin
-from ...typing import AsyncResult, Messages, Cookies, ImagesType
+from ...typing import AsyncResult, Messages, Cookies, MediaListType
 from ...requests.raise_for_status import raise_for_status
 from ...requests import StreamSession
 from ...requests import get_nodriver
 from ...image import ImageRequest, to_image, to_bytes, is_accepted_format
-from ...errors import MissingAuthError, NoValidHarFileError
-from ...providers.response import JsonConversation, FinishReason, SynthesizeData, AuthResult, ImageResponse
-from ...providers.response import Sources, TitleGeneration, RequestLogin, Parameters, Reasoning
-from ..helper import format_cookies
+from ...errors import MissingAuthError, NoValidHarFileError, ModelNotSupportedError
+from ...providers.response import JsonConversation, FinishReason, SynthesizeData, AuthResult, ImageResponse, ImagePreview
+from ...providers.response import Sources, TitleGeneration, RequestLogin, Reasoning
+from ...tools.media import merge_media
+from ..helper import format_cookies, format_image_prompt, to_string
 from ..openai.models import default_model, default_image_model, models, image_models, text_models
 from ..openai.har_file import get_request_config
 from ..openai.har_file import RequestConfig, arkReq, arkose_url, start_url, conversation_url, backend_url, backend_anon_url
@@ -101,7 +102,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
     image_models = image_models
     vision_models = text_models
     models = models
-    synthesize_content_type = "audio/mpeg"
+    synthesize_content_type = "audio/aac"
     request_config = RequestConfig()
 
     _api_key: str = None
@@ -110,8 +111,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
     _expires: int = None
 
     @classmethod
-    async def on_auth_async(cls, **kwargs) -> AsyncIterator:
-        async for chunk in cls.login():
+    async def on_auth_async(cls, proxy: str = None, **kwargs) -> AsyncIterator:
+        async for chunk in cls.login(proxy=proxy):
             yield chunk
         yield AuthResult(
             api_key=cls._api_key,
@@ -127,7 +128,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
         cls,
         session: StreamSession,
         auth_result: AuthResult,
-        images: ImagesType,
+        media: MediaListType,
     ) -> ImageRequest:
         """
         Upload an image to the service and get the download URL
@@ -135,12 +136,13 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
         Args:
             session: The StreamSession object to use for requests
             headers: The headers to include in the requests
-            images: The images to upload, either a PIL Image object or a bytes object
+            media: The images to upload, either a PIL Image object or a bytes object
         
         Returns:
             An ImageRequest object that contains the download URL, file name, and other data
         """
         async def upload_image(image, image_name):
+            debug.log(f"Uploading image: {image_name}")
             # Convert the image to a PIL Image object and get the extension
             data_bytes = to_bytes(image)
             image = to_image(data_bytes)
@@ -151,8 +153,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                 "use_case":	"multimodal"
             }
             # Post the image data to the service and get the image data
-            headers = auth_result.headers if hasattr(auth_result, "headers") else None
-            async with session.post(f"{cls.url}/backend-api/files", json=data, headers=headers) as response:
+            async with session.post(f"{cls.url}/backend-api/files", json=data, headers=cls._headers) as response:
                 cls._update_request_args(auth_result, session)
                 await raise_for_status(response, "Create file failed")
                 image_data = {
@@ -187,9 +188,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                 await raise_for_status(response, "Get download url failed")
                 image_data["download_url"] = (await response.json())["download_url"]
             return ImageRequest(image_data)
-        if not images:
-            return
-        return [await upload_image(image, image_name) for image, image_name in images]
+        return [await upload_image(image, image_name) for image, image_name in media]
 
     @classmethod
     def create_messages(cls, messages: Messages, image_requests: ImageRequest = None, system_hints: list = None):
@@ -203,11 +202,25 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
         Returns:
             A list of messages with the user input and the image, if any
         """
-        # Create a message object with the user role and the content
+        # merged_messages = []
+        # last_message = None
+        # for message in messages:
+        #     current_message = last_message
+        #     if current_message is not None:
+        #         if current_message["role"] == message["role"]:
+        #             current_message["content"] += "\n" + message["content"]
+        #         else:
+        #             merged_messages.append(current_message)
+        #             last_message = message.copy()
+        #     else:
+        #         last_message = message.copy()
+        # if last_message is not None:
+        #     merged_messages.append(last_message)
+
         messages = [{
             "id": str(uuid.uuid4()),
             "author": {"role": message["role"]},
-            "content": {"content_type": "text", "parts": [message["content"]]},
+            "content": {"content_type": "text", "parts": [to_string(message["content"])]},
             "metadata": {"serialization_metadata": {"custom_symbol_offsets": []}, **({"system_hints": system_hints} if system_hints else {})},
             "create_time": time.time(),
         } for message in messages]
@@ -240,22 +253,43 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
         return messages
 
     @classmethod
-    async def get_generated_image(cls, session: StreamSession, auth_result: AuthResult, element: dict, prompt: str = None) -> ImageResponse:
+    async def get_generated_image(cls, session: StreamSession, auth_result: AuthResult, element: Union[dict, str], prompt: str = None, conversation_id: str = None) -> AsyncIterator:
+        download_urls = []
+        is_sediment = False
+        if prompt is None:
+            try:
+                prompt = element["metadata"]["dalle"]["prompt"]
+            except KeyError:
+                pass
+        if "asset_pointer" in element:
+            element = element["asset_pointer"] 
+        if isinstance(element, str) and element.startswith("file-service://"):
+            element = element.split("file-service://", 1)[-1]
+        elif isinstance(element, str) and element.startswith("sediment://"):
+            is_sediment = True
+            element = element.split("sediment://")[-1]
+        else:
+            raise RuntimeError(f"Invalid image element: {element}")
+        if is_sediment:
+            url = f"{cls.url}/backend-api/conversation/{conversation_id}/attachment/{element}/download"
+        else:
+            url =f"{cls.url}/backend-api/files/{element}/download"
         try:
-            prompt = element["metadata"]["dalle"]["prompt"]
-            file_id = element["asset_pointer"].split("file-service://", 1)[1]
-        except TypeError:
-            return
-        except Exception as e:
-            raise RuntimeError(f"No Image: {e.__class__.__name__}: {e}")
-        try:
-            async with session.get(f"{cls.url}/backend-api/files/{file_id}/download", headers=auth_result.headers) as response:
+            async with session.get(url, headers=auth_result.headers) as response:
                 cls._update_request_args(auth_result, session)
                 await raise_for_status(response)
-                download_url = (await response.json())["download_url"]
-                return ImageResponse(download_url, prompt)
+                data = await response.json()
+                download_url = data.get("download_url")
+                if download_url is not None:
+                    download_urls.append(download_url)
+                    debug.log(f"OpenaiChat: Found image: {download_url}")
+                else:
+                    debug.log("OpenaiChat: No download URL found in response: ", data)
         except Exception as e:
-            raise RuntimeError(f"Error in downloading image: {e}")
+            debug.error("OpenaiChat: Download image failed")
+            debug.error(e)
+        if download_urls:
+            return ImagePreview(download_urls, prompt) if is_sediment else ImageResponse(download_urls, prompt)
 
     @classmethod
     async def create_authed(
@@ -264,16 +298,14 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
         messages: Messages,
         auth_result: AuthResult,
         proxy: str = None,
-        timeout: int = 180,
+        timeout: int = 360,
         auto_continue: bool = False,
-        history_disabled: bool = False,
         action: str = "next",
-        conversation_id: str = None,
         conversation: Conversation = None,
-        images: ImagesType = None,
-        return_conversation: bool = False,
-        max_retries: int = 0,
+        media: MediaListType = None,
+        return_conversation: bool = True,
         web_search: bool = False,
+        prompt: str = None,
         **kwargs
     ) -> AsyncResult:
         """
@@ -286,10 +318,9 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
             timeout (int): Timeout for requests.
             api_key (str): Access token for authentication.
             auto_continue (bool): Flag to automatically continue the conversation.
-            history_disabled (bool): Flag to disable history and training.
             action (str): Type of action ('next', 'continue', 'variant').
             conversation_id (str): ID of the conversation.
-            images (ImagesType): Images to include in the conversation.
+            media (MediaListType): Images to include in the conversation.
             return_conversation (bool): Flag to include response fields in the output.
             **kwargs: Additional keyword arguments.
 
@@ -305,7 +336,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
             timeout=timeout
         ) as session:
             image_requests = None
-            if not cls.needs_auth:
+            media  = merge_media(media, messages)
+            if not cls.needs_auth and not media:
                 if cls._headers is None:
                     cls._create_request_args(cls._cookies)
                     async with session.get(cls.url, headers=INIT_HEADERS) as response:
@@ -320,13 +352,16 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                     cls._update_request_args(auth_result, session)
                     await raise_for_status(response)
                 try:
-                    image_requests = await cls.upload_images(session, auth_result, images) if images else None
+                    image_requests = await cls.upload_images(session, auth_result, media)
                 except Exception as e:
-                    debug.log("OpenaiChat: Upload image failed")
-                    debug.log(f"{e.__class__.__name__}: {e}")
-            model = cls.get_model(model)
+                    debug.error("OpenaiChat: Upload image failed")
+                    debug.error(e)
+            try:
+                model = cls.get_model(model)
+            except ModelNotSupportedError:
+                pass
             if conversation is None:
-                conversation = Conversation(conversation_id, str(uuid.uuid4()), getattr(auth_result, "cookies", {}).get("oai-did"))
+                conversation = Conversation(None, str(uuid.uuid4()), getattr(auth_result, "cookies", {}).get("oai-did"))
             else:
                 conversation = copy(conversation)
             if getattr(auth_result, "cookies", {}).get("oai-did") != getattr(conversation, "user_id", None):
@@ -344,7 +379,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                     headers=cls._headers
                 ) as response:
                     if response.status in (401, 403):
-                        auth_result.reset()
+                        raise MissingAuthError(f"Response status: {response.status}")
                     else:
                         cls._update_request_args(auth_result, session)
                     await raise_for_status(response)
@@ -360,49 +395,42 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                 #     if auth_result.arkose_token is None:
                 #         raise MissingAuthError("No arkose token found in .har file")
                 if "proofofwork" in chat_requirements:
-                    if getattr(auth_result, "proof_token", None) is None:
-                        auth_result.proof_token = get_config(auth_result.headers.get("user-agent"))
+                    user_agent = getattr(auth_result, "headers", {}).get("user-agent")
+                    proof_token = getattr(auth_result, "proof_token", None)
+                    if proof_token is None:
+                        auth_result.proof_token = get_config(user_agent)
                     proofofwork = generate_proof_token(
                         **chat_requirements["proofofwork"],
-                        user_agent=getattr(auth_result, "headers", {}).get("user-agent"),
-                        proof_token=getattr(auth_result, "proof_token", None)
+                        user_agent=user_agent,
+                        proof_token=proof_token
                     )
                 [debug.log(text) for text in (
                     #f"Arkose: {'False' if not need_arkose else auth_result.arkose_token[:12]+'...'}",
                     #f"Proofofwork: {'False' if proofofwork is None else proofofwork[:12]+'...'}",
                     #f"AccessToken: {'False' if cls._api_key is None else cls._api_key[:12]+'...'}",
                 )]
-                if action == "continue" and conversation.message_id is None:
-                    action = "next"
                 data = {
-                    "action": action,
+                    "action": "next",
                     "parent_message_id": conversation.message_id,
                     "model": model,
                     "timezone_offset_min":-60,
                     "timezone":"Europe/Berlin",
-                    "suggestions":[],
-                    "history_and_training_disabled": history_disabled and not auto_continue and not return_conversation or not cls.needs_auth,
-                    "conversation_mode":{"kind":"primary_assistant","plugin_ids":None},
-                    "force_paragen":False,
-                    "force_paragen_model_slug":"",
-                    "force_rate_limit":False,
-                    "reset_rate_limits":False,
-                    "websocket_request_id": str(uuid.uuid4()),
+                    "conversation_mode":{"kind":"primary_assistant"},
+                    "enable_message_followups":True,
                     "system_hints": ["search"] if web_search else None,
+                    "supports_buffering":True,
                     "supported_encodings":["v1"],
-                    "conversation_origin":None,
                     "client_contextual_info":{"is_dark_mode":False,"time_since_loaded":random.randint(20, 500),"page_height":578,"page_width":1850,"pixel_ratio":1,"screen_height":1080,"screen_width":1920},
-                    "paragen_stream_type_override":None,
-                    "paragen_cot_summary_display_override":"allow",
-                    "supports_buffering":True
+                    "paragen_cot_summary_display_override":"allow"
                 }
                 if conversation.conversation_id is not None:
                     data["conversation_id"] = conversation.conversation_id
                     debug.log(f"OpenaiChat: Use conversation: {conversation.conversation_id}")
+                prompt = conversation.prompt = format_image_prompt(messages, prompt)
                 if action != "continue":
                     data["parent_message_id"] = getattr(conversation, "parent_message_id", conversation.message_id)
                     conversation.parent_message_id = None
-                    messages = messages if conversation_id is None else [messages[-1]]
+                    messages = messages if conversation.conversation_id is None else [{"role": "user", "content": prompt}]
                     data["messages"] = cls.create_messages(messages, image_requests, ["search"] if web_search else None)
                 headers = {
                     **cls._headers,
@@ -424,12 +452,22 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                     headers=headers
                 ) as response:
                     cls._update_request_args(auth_result, session)
-                    if response.status == 403:
-                        auth_result.proof_token = None
-                        cls.request_config.proof_token = None
+                    if response.status in (401, 403, 429):
+                        raise MissingAuthError("Access token is not valid")
+                    elif response.status == 422:
+                        raise RuntimeError((await response.json()), data)
                     await raise_for_status(response)
                     buffer = u""
+                    matches = []
                     async for line in response.iter_lines():
+                        pattern = re.compile(r"file-service://[\w-]+")
+                        for match in pattern.finditer(line.decode(errors="ignore")):
+                            if match.group(0) in matches:
+                                continue
+                            matches.append(match.group(0))
+                            generated_image = await cls.get_generated_image(session, auth_result, match.group(0), prompt)
+                            if generated_image is not None:
+                                yield generated_image
                         async for chunk in cls.iter_messages_line(session, auth_result, line, conversation, sources):
                             if isinstance(chunk, str):
                                 chunk = chunk.replace("\ue203", "").replace("\ue204", "").replace("\ue206", "")
@@ -444,7 +482,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                                                 link = sources.list[int(match.group(1))]["url"]
                                                 return f"[[{int(match.group(1))+1}]]({link})"
                                             return f" [{int(match.group(1))+1}]"
-                                        buffer = re.sub(r'(?:cite\nturn0search|cite\nturn0news|turn0news)(\d+)', replacer, buffer)
+                                        buffer = re.sub(r'(?:cite\nturn[0-9]+|turn[0-9]+)(?:search|news|view)(\d+)', replacer, buffer)
                                     else:
                                         continue
                                 yield buffer
@@ -455,9 +493,13 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                             break
                 if sources.list:
                     yield sources
+                if conversation.generated_images:
+                    yield ImageResponse(conversation.generated_images.urls, conversation.prompt)
+                    conversation.generated_images = None
+                conversation.prompt = None
                 if return_conversation:
                     yield conversation
-                if not history_disabled and auth_result.api_key is not None:
+                if auth_result.api_key is not None:
                     yield SynthesizeData(cls.__name__, {
                         "conversation_id": conversation.conversation_id,
                         "message_id": conversation.message_id,
@@ -469,14 +511,6 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                     await asyncio.sleep(5)
                 else:
                     break
-                yield Parameters(**{
-                    "action": "continue" if conversation.finish_reason == "max_tokens" else "variant",
-                    "conversation": conversation.get_dict(),
-                    "proof_token": cls.request_config.proof_token,
-                    "cookies": cls._cookies,
-                    "headers": cls._headers,
-                    "web_search": web_search,
-                })
             yield FinishReason(conversation.finish_reason)
 
     @classmethod
@@ -484,8 +518,6 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
         if not line.startswith(b"data: "):
             return
         elif line.startswith(b"data: [DONE]"):
-            if fields.finish_reason is None:
-                fields.finish_reason = "error"
             return
         try:
             line = json.loads(line[6:])
@@ -496,25 +528,45 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
         if "type" in line:
             if line["type"] == "title_generation":
                 yield TitleGeneration(line["title"])
+        fields.p = line.get("p", fields.p)
+        if fields.p is not None and fields.p.startswith("/message/content/thoughts"):
+            if fields.p.endswith("/content"):
+                if fields.thoughts_summary:
+                    yield Reasoning(token="", status=fields.thoughts_summary)
+                    fields.thoughts_summary = ""
+                yield Reasoning(token=line.get("v"))
+            elif fields.p.endswith("/summary"):
+                fields.thoughts_summary += line.get("v")
+            return
         if "v" in line:
             v = line.get("v")
-            if isinstance(v, str) and fields.is_recipient:
+            if isinstance(v, str) and fields.recipient == "all":
                 if "p" not in line or line.get("p") == "/message/content/parts/0":
                     yield Reasoning(token=v) if fields.is_thinking else v
             elif isinstance(v, list):
                 for m in v:
-                    if m.get("p") == "/message/content/parts/0" and fields.is_recipient:
+                    if m.get("p") == "/message/content/parts/0" and fields.recipient == "all":
                         yield m.get("v")
+                    elif m.get("p") == "/message/metadata/image_gen_title":
+                        fields.prompt = m.get("v")
+                    elif m.get("p") == "/message/content/parts/0/asset_pointer":
+                        generated_images = fields.generated_images = await cls.get_generated_image(session, auth_result, m.get("v"), fields.prompt, fields.conversation_id)
+                        if generated_images is not None:
+                            yield generated_images
                     elif m.get("p") == "/message/metadata/search_result_groups":
                         for entry in [p.get("entries") for p in m.get("v")]:
                             for link in entry:
                                 sources.add_source(link)
-                    elif re.match(r"^/message/metadata/content_references/\d+$", m.get("p")):
+                    elif m.get("p") == "/message/metadata/content_references":
+                        for entry in m.get("v"):
+                            for link in entry.get("sources", []):
+                                sources.add_source(link)
+                    elif m.get("p") and re.match(r"^/message/metadata/content_references/\d+$", m.get("p")):
                         sources.add_source(m.get("v"))
                     elif m.get("p") == "/message/metadata/finished_text":
                         fields.is_thinking = False
                         yield Reasoning(status=m.get("v"))
-                    elif m.get("p") == "/message/metadata":
+                    elif m.get("p") == "/message/metadata" and fields.recipient == "all":
                         fields.finish_reason = m.get("v", {}).get("finish_details", {}).get("type")
                         break
             elif isinstance(v, dict):
@@ -522,21 +574,16 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                     fields.conversation_id = v.get("conversation_id")
                     debug.log(f"OpenaiChat: New conversation: {fields.conversation_id}")
                 m = v.get("message", {})
-                fields.is_recipient = m.get("recipient", "all") == "all"
-                if fields.is_recipient:
+                fields.recipient = m.get("recipient", fields.recipient)
+                if fields.recipient == "all":
                     c = m.get("content", {})
                     if c.get("content_type") == "text" and m.get("author", {}).get("role") == "tool" and "initial_text" in m.get("metadata", {}):
                         fields.is_thinking = True
                         yield Reasoning(status=m.get("metadata", {}).get("initial_text"))
-                    if c.get("content_type") == "multimodal_text":
-                        generated_images = []
-                        for element in c.get("parts"):
-                            if isinstance(element, dict) and element.get("content_type") == "image_asset_pointer":
-                                image = cls.get_generated_image(session, auth_result, element)
-                                generated_images.append(image)
-                        for image_response in await asyncio.gather(*generated_images):
-                            if image_response is not None:
-                                yield image_response
+                    #if c.get("content_type") == "multimodal_text":
+                    #    for part in c.get("parts"):
+                    #        if isinstance(part, dict) and part.get("content_type") == "image_asset_pointer":
+                    #            yield await cls.get_generated_image(session, auth_result, part, fields.prompt, fields.conversation_id)
                     if m.get("author", {}).get("role") == "assistant":
                         if fields.parent_message_id is None:
                             fields.parent_message_id = v.get("message", {}).get("id")
@@ -585,38 +632,37 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
             cls._set_api_key(api_key)
         else:
             try:
-                await get_request_config(cls.request_config, proxy)
+                cls.request_config = await get_request_config(cls.request_config, proxy)
+                if cls.request_config is None:
+                    cls.request_config = RequestConfig()
                 cls._create_request_args(cls.request_config.cookies, cls.request_config.headers)
-                if cls.request_config.access_token is not None or cls.needs_auth:
-                    if not cls._set_api_key(cls.request_config.access_token):
-                        raise NoValidHarFileError(f"Access token is not valid: {cls.request_config.access_token}")
+                if cls.needs_auth and cls.request_config.access_token is None:
+                    raise NoValidHarFileError(f"Missing access token")
+                if not cls._set_api_key(cls.request_config.access_token):
+                    raise NoValidHarFileError(f"Access token is not valid: {cls.request_config.access_token}")
             except NoValidHarFileError:
                 if has_nodriver:
-                    if cls._api_key is None:
-                        login_url = os.environ.get("G4F_LOGIN_URL")
-                        if login_url:
-                            yield RequestLogin(cls.label, login_url)
+                    if cls.request_config.access_token is None:
+                        yield RequestLogin(cls.label, os.environ.get("G4F_LOGIN_URL", ""))
                         await cls.nodriver_auth(proxy)
                 else:
                     raise
-        yield Parameters(**{
-            "api_key": cls._api_key,
-            "proof_token": cls.request_config.proof_token,
-            "cookies": cls.request_config.cookies,
-        })
 
     @classmethod
     async def nodriver_auth(cls, proxy: str = None):
         browser, stop_browser = await get_nodriver(proxy=proxy)
         try:
             page = browser.main_tab
-            def on_request(event: nodriver.cdp.network.RequestWillBeSent):
+            def on_request(event: nodriver.cdp.network.RequestWillBeSent, page=None):
                 if event.request.url == start_url or event.request.url.startswith(conversation_url):
-                    cls.request_config.headers = event.request.headers
+                    if cls.request_config.headers is None:
+                        cls.request_config.headers = {}
+                    for key, value in event.request.headers.items():
+                        cls.request_config.headers[key.lower()] = value
                 elif event.request.url in (backend_url, backend_anon_url):
                     if "OpenAI-Sentinel-Proof-Token" in event.request.headers:
                             cls.request_config.proof_token = json.loads(base64.b64decode(
-                                event.request.headers["OpenAI-Sentinel-Proof-Token"].split("gAAAAAB", 1)[-1].encode()
+                                event.request.headers["OpenAI-Sentinel-Proof-Token"].split("gAAAAAB", 1)[-1].split("~")[0].encode()
                             ).decode())
                     if "OpenAI-Sentinel-Turnstile-Token" in event.request.headers:
                         cls.request_config.turnstile_token = event.request.headers["OpenAI-Sentinel-Turnstile-Token"]
@@ -633,19 +679,23 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
             await page.send(nodriver.cdp.network.enable())
             page.add_handler(nodriver.cdp.network.RequestWillBeSent, on_request)
             page = await browser.get(cls.url)
-            user_agent = await page.evaluate("window.navigator.userAgent")
-            await page.select("#prompt-textarea", 240)
-            await page.evaluate("document.getElementById('prompt-textarea').innerText = 'Hello'")
+            user_agent = await page.evaluate("window.navigator.userAgent", return_by_value=True)
+            while not await page.evaluate("document.getElementById('prompt-textarea').id"):
+                await asyncio.sleep(1)
+            while not await page.evaluate("document.querySelector('[data-testid=\"send-button\"]').type"):
+                await asyncio.sleep(1)
             await page.evaluate("document.querySelector('[data-testid=\"send-button\"]').click()")
             while True:
-                if cls._api_key is not None or not cls.needs_auth:
-                    break
-                body = await page.evaluate("JSON.stringify(window.__remixContext)")
+                body = await page.evaluate("JSON.stringify(window.__remixContext)", return_by_value=True)
+                if hasattr(body, "value"):
+                    body = body.value
                 if body:
-                    match = re.search(r'"accessToken":"(.*?)"', body)
+                    match = re.search(r'"accessToken":"(.+?)"', body)
                     if match:
                         cls._api_key = match.group(1)
                         break
+                if cls._api_key is not None or not cls.needs_auth:
+                    break
                 await asyncio.sleep(1)
             while True:
                 if cls.request_config.proof_token:
@@ -684,6 +734,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
 
     @classmethod
     def _set_api_key(cls, api_key: str):
+        cls._api_key = api_key
         if api_key:
             exp = api_key.split(".")[1]
             exp = (exp + "=" * (4 - len(exp) % 4)).encode()
@@ -691,11 +742,11 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
             debug.log(f"OpenaiChat: API key expires at\n {cls._expires} we have:\n {time.time()}")
             if time.time() > cls._expires:
                 debug.log(f"OpenaiChat: API key is expired")
+                return False
             else:
-                cls._api_key = api_key
                 cls._headers["authorization"] = f"Bearer {api_key}"
                 return True
-        return False
+        return True
 
     @classmethod
     def _update_cookie_header(cls):
@@ -710,10 +761,14 @@ class Conversation(JsonConversation):
         self.conversation_id = conversation_id
         self.message_id = message_id
         self.finish_reason = finish_reason
-        self.is_recipient = False
+        self.recipient = "all"
         self.parent_message_id = message_id if parent_message_id is None else parent_message_id
         self.user_id = user_id
         self.is_thinking = is_thinking
+        self.p = None
+        self.thoughts_summary = ""
+        self.prompt = None
+        self.generated_images: ImagePreview = None
 
 def get_cookies(
     urls: Optional[Iterator[str]] = None

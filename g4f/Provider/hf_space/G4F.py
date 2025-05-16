@@ -2,20 +2,22 @@ from __future__ import annotations
 
 from aiohttp import ClientSession
 import time
+import random
 import asyncio
 
 from ...typing import AsyncResult, Messages
 from ...providers.response import ImageResponse, Reasoning, JsonConversation
 from ..helper import format_image_prompt, get_random_string
-from .Janus_Pro_7B import Janus_Pro_7B, get_zerogpu_token
-from .BlackForestLabsFlux1Dev import BlackForestLabsFlux1Dev
+from .DeepseekAI_JanusPro7b import DeepseekAI_JanusPro7b, get_zerogpu_token
+from .BlackForestLabs_Flux1Dev import BlackForestLabs_Flux1Dev
 from .raise_for_status import raise_for_status
 
-class FluxDev(BlackForestLabsFlux1Dev):
+class FluxDev(BlackForestLabs_Flux1Dev):
     url = "https://roxky-flux-1-dev.hf.space"
     space = "roxky/FLUX.1-dev"
+    referer = f"{url}/?__theme=light"
 
-class G4F(Janus_Pro_7B):
+class G4F(DeepseekAI_JanusPro7b):
     label = "G4F framework"
     space = "roxky/Janus-Pro-7B"
     url = f"https://huggingface.co/spaces/roxky/g4f-space"
@@ -25,8 +27,8 @@ class G4F(Janus_Pro_7B):
 
     default_model = "flux"
     model_aliases = {"flux-schnell": default_model}
-    image_models = [Janus_Pro_7B.default_image_model, default_model, "flux-dev", *model_aliases.keys()]
-    models = [Janus_Pro_7B.default_model, *image_models]
+    image_models = [DeepseekAI_JanusPro7b.default_image_model, default_model, "flux-dev", *model_aliases.keys()]
+    models = [DeepseekAI_JanusPro7b.default_model, *image_models]
 
     @classmethod
     async def create_async_generator(
@@ -35,11 +37,12 @@ class G4F(Janus_Pro_7B):
         messages: Messages,
         proxy: str = None,
         prompt: str = None,
-        width: int = 1024,
-        height: int = 1024,
+        aspect_ratio: str = "1:1",
+        width: int = None,
+        height: int = None,
         seed: int = None,
         cookies: dict = None,
-        zerogpu_token: str = None,
+        api_key: str = None,
         zerogpu_uuid: str = "[object Object]",
         **kwargs
     ) -> AsyncResult:
@@ -48,11 +51,12 @@ class G4F(Janus_Pro_7B):
                 model, messages,
                 proxy=proxy,
                 prompt=prompt,
+                aspect_ratio=aspect_ratio,
                 width=width,
                 height=height,
                 seed=seed,
                 cookies=cookies,
-                zerogpu_token=zerogpu_token,
+                api_key=api_key,
                 zerogpu_uuid=zerogpu_uuid,
                 **kwargs
             ):
@@ -65,7 +69,7 @@ class G4F(Janus_Pro_7B):
                 prompt=prompt,
                 seed=seed,
                 cookies=cookies, 
-                zerogpu_token=zerogpu_token,
+                api_key=api_key,
                 zerogpu_uuid=zerogpu_uuid,
                 **kwargs
             ):
@@ -78,7 +82,7 @@ class G4F(Janus_Pro_7B):
         if prompt is None:
             prompt = format_image_prompt(messages)
         if seed is None:
-            seed = int(time.time())
+            seed = random.randint(9999, 2**32 - 1)
 
         payload = {
             "data": [
@@ -95,11 +99,11 @@ class G4F(Janus_Pro_7B):
             "trigger_id": 10
         }
         async with ClientSession() as session:
-            if zerogpu_token is None:
+            if api_key is None:
                 yield Reasoning(status="Acquiring GPU Token")
-                zerogpu_uuid, zerogpu_token = await get_zerogpu_token(cls.space, session, JsonConversation(), cookies)
+                zerogpu_uuid, api_key = await get_zerogpu_token(cls.space, session, JsonConversation(), cookies)
             headers = {
-                "x-zerogpu-token": zerogpu_token,
+                "x-zerogpu-token": api_key,
                 "x-zerogpu-uuid": zerogpu_uuid,
             }
             headers = {k: v for k, v in headers.items() if v is not None}

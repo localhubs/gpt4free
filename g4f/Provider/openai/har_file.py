@@ -30,8 +30,6 @@ class RequestConfig:
     turnstile_token: str = None
     arkose_request: arkReq = None
     arkose_token: str = None
-    headers: dict = {}
-    cookies: dict = {}
     data_build: str = "prod-db8e51e8414e068257091cf5003a62d3d4ee6ed0"
 
 class arkReq:
@@ -51,6 +49,7 @@ def get_har_files():
         for file in files:
             if file.endswith(".har"):
                 harPath.append(os.path.join(root, file))
+        break
     if not harPath:
         raise NoValidHarFileError("No .har file found")
     harPath.sort(key=lambda x: os.path.getmtime(x))
@@ -88,8 +87,6 @@ def readHAR(request_config: RequestConfig):
                         request_config.cookies = {c['name']: c['value'] for c in v['request']['cookies']}
                     except Exception as e:
                         debug.log(f"Error on read headers: {e}")
-    if request_config.proof_token is None:
-        raise NoValidHarFileError("No proof_token found in .har files")
 
 def get_headers(entry) -> dict:
     return {h['name'].lower(): h['value'] for h in entry['request']['headers'] if h['name'].lower() not in ['content-length', 'cookie'] and not h['name'].startswith(':')}
@@ -154,8 +151,9 @@ def getN() -> str:
     return base64.b64encode(timestamp.encode()).decode()
 
 async def get_request_config(request_config: RequestConfig, proxy: str) -> RequestConfig:
-    if request_config.proof_token is None:
-        readHAR(request_config)
+    readHAR(request_config)
     if request_config.arkose_request is not None:
         request_config.arkose_token = await sendRequest(genArkReq(request_config.arkose_request), proxy)
+    if request_config.proof_token is None:
+        raise NoValidHarFileError("No proof_token found in .har files")
     return request_config

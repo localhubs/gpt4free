@@ -6,7 +6,7 @@ import base64
 from typing import Optional
 
 from ..helper import filter_none
-from ...typing import AsyncResult, Messages, ImagesType
+from ...typing import AsyncResult, Messages, MediaListType
 from ...requests import StreamSession, raise_for_status
 from ...providers.response import FinishReason, ToolCalls, Usage
 from ...errors import MissingAuthError
@@ -62,7 +62,7 @@ class Anthropic(OpenaiAPI):
         messages: Messages,
         proxy: str = None,
         timeout: int = 120,
-        images: ImagesType = None,
+        media: MediaListType = None,
         api_key: str = None,
         temperature: float = None,
         max_tokens: int = 4096,
@@ -73,15 +73,15 @@ class Anthropic(OpenaiAPI):
         headers: dict = None,
         impersonate: str = None,
         tools: Optional[list] = None,
-        extra_data: dict = {},
+        extra_body: dict = {},
         **kwargs
     ) -> AsyncResult:
         if api_key is None:
             raise MissingAuthError('Add a "api_key"')
 
-        if images is not None:
+        if media is not None:
             insert_images = []
-            for image, _ in images:
+            for image, _ in media:
                 data = to_bytes(image)
                 insert_images.append({
                     "type": "image",
@@ -121,7 +121,7 @@ class Anthropic(OpenaiAPI):
                 system=system,
                 stream=stream,
                 tools=tools,
-                **extra_data
+                **extra_body
             )
             async with session.post(f"{cls.api_base}/messages", json=data) as response:
                 await raise_for_status(response)
