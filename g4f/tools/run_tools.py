@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import json
 import asyncio
@@ -122,28 +123,27 @@ class ToolHandler:
 
 class AuthManager:
     """Handles API key management"""
-    
-    @staticmethod
-    def get_api_key_file(cls) -> Path:
-        """Get the path to the API key file for a provider"""
-        return Path(get_cookies_dir()) / f"api_key_{cls.parent if hasattr(cls, 'parent') else cls.__name__}.json"
+    aliases = {
+        "GeminiPro": "Gemini",
+        "PollinationsAI": "Pollinations",
+        "OpenaiAPI": "Openai",
+    }
 
-    @staticmethod
-    def load_api_key(provider: Any) -> Optional[str]:
-        """Load API key from config file if needed"""
-        if not getattr(provider, "needs_auth", False):
+    @classmethod
+    def load_api_key(cls, provider: ProviderType) -> Optional[str]:
+        """Load API key from config file"""
+        if not provider.needs_auth and not hasattr(provider, "login_url"):
             return None
-
-        auth_file = AuthManager.get_api_key_file(provider)
-        try:
-            if auth_file.exists():
-                with auth_file.open("r") as f:
-                    auth_result = json.load(f)
-                return auth_result.get("api_key")
-        except (json.JSONDecodeError, PermissionError, FileNotFoundError) as e:
-            debug.error(f"Failed to load API key: {e.__class__.__name__}: {e}")
+        provider_name = provider.get_parent()
+        env_var = f"{provider_name.upper()}_API_KEY"
+        api_key = os.environ.get(env_var)
+        if not api_key and provider_name in cls.aliases:
+            env_var = f"{cls.aliases[provider_name].upper()}_API_KEY"
+            api_key = os.environ.get(env_var)
+        if api_key:
+            debug.log(f"Loading API key from environment variable {env_var}")
+            return api_key
         return None
-
 
 class ThinkingProcessor:
     """Processes thinking chunks"""
@@ -170,7 +170,7 @@ class ThinkingProcessor:
                 if "</think>" in after[0]:
                     after, *after_end = after[0].split("</think>", 1)
                     results.append(Reasoning(after))
-                    results.append(Reasoning(status="Finished", is_thinking="</think>"))
+                    results.append(Reasoning(status="", is_thinking="</think>"))
                     if after_end:
                         results.append(after_end[0])
                     return 0, results
@@ -187,10 +187,10 @@ class ThinkingProcessor:
                 results.append(Reasoning(before_end))
                 
             thinking_duration = time.time() - start_time if start_time > 0 else 0
-            
-            status = f"Thought for {thinking_duration:.2f}s" if thinking_duration > 1 else "Finished"
+
+            status = f"Thought for {thinking_duration:.2f}s" if thinking_duration > 1 else ""
             results.append(Reasoning(status=status, is_thinking="</think>"))
-            
+
             # Make sure to handle text after the closing tag
             if after and after[0].strip():
                 results.append(after[0])
@@ -234,11 +234,12 @@ async def async_iter_run_tools(
     web_search = kwargs.get('web_search')
     if web_search:
         messages, sources = await perform_web_search(messages, web_search)
-    
-    # Get API key if needed
-    api_key = AuthManager.load_api_key(provider)
-    if api_key and "api_key" not in kwargs:
-        kwargs["api_key"] = api_key
+
+    # Get API key
+    if not kwargs.get("api_key"):
+        api_key = AuthManager.load_api_key(provider)
+        if api_key:
+            kwargs["api_key"] = api_key
     
     # Process tool calls
     if tool_calls:
@@ -246,8 +247,7 @@ async def async_iter_run_tools(
         kwargs.update(extra_kwargs)
     
     # Generate response
-    create_function = provider.get_async_create_function()
-    response = to_async_iterator(create_function(model=model, messages=messages, **kwargs))
+    response = to_async_iterator(provider.async_create_function(model=model, messages=messages, **kwargs))
     
     async for chunk in response:
         yield chunk
@@ -256,12 +256,10 @@ async def async_iter_run_tools(
     if sources:
         yield sources
 
-
 def iter_run_tools(
-    iter_callback: Callable,
+    provider: ProviderType,
     model: str,
     messages: Messages,
-    provider: Optional[str] = None,
     tool_calls: Optional[List[dict]] = None,
     **kwargs
 ) -> Iterator:
@@ -280,11 +278,11 @@ def iter_run_tools(
             debug.error(f"Couldn't do web search: {e.__class__.__name__}: {e}")
     
     # Get API key if needed
-    if provider is not None and getattr(provider, "needs_auth", False) and "api_key" not in kwargs:
+    if provider is not None and not kwargs.get("api_key"):
         api_key = AuthManager.load_api_key(provider)
         if api_key:
             kwargs["api_key"] = api_key
-    
+
     # Process tool calls
     if tool_calls:
         for tool in tool_calls:
@@ -299,7 +297,7 @@ def iter_run_tools(
                         **tool["function"]["arguments"]
                     )
                 elif function_name == TOOL_NAMES["CONTINUE"]:
-                    if provider not in ("OpenaiAccount", "HuggingFace"):
+                    if provider.__name__ not in ("OpenaiAccount", "HuggingFace"):
                         last_line = messages[-1]["content"].strip().splitlines()[-1]
                         content = f"Carry on from this point:\n{last_line}"
                         messages.append({"role": "user", "content": content})
@@ -325,7 +323,7 @@ def iter_run_tools(
     thinking_start_time = 0
     processor = ThinkingProcessor()
     
-    for chunk in iter_callback(model=model, messages=messages, provider=provider, **kwargs):
+    for chunk in provider.create_function(model=model, messages=messages, provider=provider, **kwargs):
         if isinstance(chunk, FinishReason):
             if sources is not None:
                 yield sources

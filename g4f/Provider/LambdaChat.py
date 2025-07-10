@@ -3,13 +3,17 @@ from __future__ import annotations
 import json
 import re
 import uuid
+import random
 from aiohttp import ClientSession, FormData
 
 from ..typing import AsyncResult, Messages
 from ..requests import raise_for_status
 from .base_provider import AsyncGeneratorProvider, ProviderModelMixin
-from .helper import format_prompt, get_last_user_message
-from ..providers.response import JsonConversation, TitleGeneration, Reasoning, FinishReason
+from .helper import get_last_user_message
+from ..providers.response import TitleGeneration, Reasoning, FinishReason
+from ..errors import ModelNotFoundError
+from .. import debug
+
 
 class LambdaChat(AsyncGeneratorProvider, ProviderModelMixin):
     label = "Lambda Chat"
@@ -18,25 +22,59 @@ class LambdaChat(AsyncGeneratorProvider, ProviderModelMixin):
 
     working = True
 
-    default_model = "deepseek-llama3.3-70b"
-    reasoning_model = "deepseek-r1"
+    default_model = "deepseek-r1"
     models = [
-        default_model,
-        reasoning_model,
+        "deepseek-llama3.3-70b",
+        "deepseek-r1",
+        "deepseek-r1-0528",
+        "apriel-5b-instruct",
         "hermes-3-llama-3.1-405b-fp8",
         "hermes3-405b-fp8-128k",
         "llama3.1-nemotron-70b-instruct",
         "lfm-40b",
         "llama3.3-70b-instruct-fp8",
-        "qwen25-coder-32b-instruct"
+        "qwen25-coder-32b-instruct",
+        "deepseek-v3",
+        "llama-4-maverick-17b-128e-instruct-fp8",
+        "llama-4-scout-17b-16e-instruct",
+        "llama3.3-70b-instruct-fp8",
+        "qwen3-32b-fp8",
     ]
     model_aliases = {
-        "deepseek-v3": default_model,
-        "hermes-3": "hermes-3-llama-3.1-405b-fp8",
-        "hermes-3-405b": "hermes3-405b-fp8-128k",
+        "deepseek-v3-0324": "deepseek-v3",
+        "hermes-3": "hermes3-405b-fp8-128k",
+        "hermes-3-405b": ["hermes3-405b-fp8-128k", "hermes-3-llama-3.1-405b-fp8"],
         "nemotron-70b": "llama3.1-nemotron-70b-instruct",
-        "qwen-2.5-coder-32b": "qwen25-coder-32b-instruct"
+        "llama-3.3-70b": "llama3.3-70b-instruct-fp8",
+        "qwen-2.5-coder-32b": "qwen25-coder-32b-instruct",
+        "llama-4-maverick": "llama-4-maverick-17b-128e-instruct-fp8",
+        "llama-4-scout": "llama-4-scout-17b-16e-instruct",
+        "qwen-3-32b": "qwen3-32b-fp8"
     }
+
+    @classmethod
+    def get_model(cls, model: str) -> str:
+        """Get the internal model name from the user-provided model name."""
+        
+        if not model:
+            return cls.default_model
+        
+        # Check if the model exists directly in our models list
+        if model in cls.models:
+            return model
+        
+        # Check if there's an alias for this model
+        if model in cls.model_aliases:
+            alias = cls.model_aliases[model]
+            # If the alias is a list, randomly select one of the options
+            if isinstance(alias, list):
+                selected_model = random.choice(alias)
+                debug.log(f"LambdaChat: Selected model '{selected_model}' from alias '{model}'")
+                return selected_model
+            debug.log(f"LambdaChat: Using model '{alias}' for alias '{model}'")
+            return alias
+        
+        raise ModelNotFoundError(f"LambdaChat: Model {model} not found")
 
     @classmethod
     async def create_async_generator(
@@ -152,6 +190,8 @@ class LambdaChat(AsyncGeneratorProvider, ProviderModelMixin):
                 data=form_data,
                 proxy=proxy
             ) as response:
+                if not response.ok:
+                    debug.log(f"LambdaChat: Request Body: {form_data}")
                 await raise_for_status(response)
                 
                 async for chunk in response.content:

@@ -12,7 +12,10 @@ class TestProviderHasModel(unittest.TestCase):
     def test_provider_has_model(self):
         for model, providers in __models__.values():
             for provider in providers:
+                if provider.needs_auth:
+                    continue
                 if issubclass(provider, ProviderModelMixin):
+                    provider.get_models() # Update models
                     if model.name in provider.model_aliases:
                         model_name = provider.model_aliases[model.name]
                     else:

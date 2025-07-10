@@ -12,13 +12,13 @@ def to_string(value) -> str:
     if isinstance(value, str):
         return value
     elif isinstance(value, dict):
-        if "name" in value:
+        if "text" in value:
+            return value["text"]
+        elif "name" in value:
             return ""
         elif "bucket_id" in value:
             bucket_dir = Path(get_bucket_dir(value.get("bucket_id")))
             return "".join(read_bucket(bucket_dir))
-        elif value.get("type") == "text":
-            return value.get("text")
         return ""
     elif isinstance(value, list):
         return "".join([to_string(v) for v in value if v.get("type", "text") == "text"])
@@ -88,7 +88,7 @@ def get_last_message(messages: Messages, prompt: str = None) -> str:
                 prompt = content
     return prompt
 
-def format_image_prompt(messages, prompt: str = None) -> str:
+def format_media_prompt(messages, prompt: str = None) -> str:
     if prompt is None:
         return get_last_user_message(messages)
     return prompt

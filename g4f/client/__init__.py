@@ -41,20 +41,22 @@ except NameError:
 def add_chunk(content, chunk):
     if content == "" and isinstance(chunk, (MediaResponse, AudioResponse)):
         content = chunk
-    else:
+    elif not isinstance(chunk, (Reasoning, ToolCalls)):
         content = str(content) + str(chunk)
     return content
 
 def resolve_media(kwargs: dict, image = None, image_name: str = None) -> None:
     if image is not None:
-        kwargs["media"] = [(image, image_name)]
+        kwargs["media"] = [(image, getattr(image, "name", image_name))]
     elif "images" in kwargs:
         kwargs["media"] = kwargs.pop("images")
-    if "media" in kwargs and not isinstance(kwargs["media"], list):
+    if kwargs.get("media") is None:
+        kwargs.pop("media", None)
+    elif not isinstance(kwargs["media"], list):
         kwargs["media"] = [kwargs["media"]]
     for idx, media in enumerate(kwargs.get("media", [])):
         if not isinstance(media, (list, tuple)):
-            kwargs["media"][idx] = (media, os.path.basename(getattr(media, "name", "")))
+            kwargs["media"][idx] = (media, getattr(media, "name", None))
 
 # Synchronous iter_response function
 def iter_response(
@@ -65,6 +67,7 @@ def iter_response(
     stop: Optional[list[str]] = None
 ) -> ChatCompletionResponseType:
     content = ""
+    reasoning_content = []
     finish_reason = None
     tool_calls = None
     usage = None
@@ -84,25 +87,25 @@ def iter_response(
             conversation = chunk
             continue
         elif isinstance(chunk, ToolCalls):
-            tool_calls = chunk.get_list()
-            continue
+            if not stream:
+                tool_calls = chunk.get_list()
+                continue
         elif isinstance(chunk, Usage):
             usage = chunk
             continue
         elif isinstance(chunk, ProviderInfo):
             provider = chunk
             continue
-        elif isinstance(chunk, BaseConversation):
-            yield chunk
-            continue
+        elif isinstance(chunk, Reasoning):
+            reasoning_content.append(chunk)
         elif isinstance(chunk, HiddenResponse):
             continue
         elif isinstance(chunk, Exception):
             continue
+        elif not chunk:
+            continue
 
         content = add_chunk(content, chunk)
-        if not content:
-            continue
         idx += 1
 
         if max_tokens is not None and idx >= max_tokens:
@@ -141,7 +144,8 @@ def iter_response(
         chat_completion = ChatCompletion.model_construct(
             content, finish_reason, completion_id, int(time.time()), usage=usage,
             **filter_none(tool_calls=[ToolCallModel.model_construct(**tool_call) for tool_call in tool_calls]) if tool_calls is not None else {},
-            conversation=None if conversation is None else conversation.get_dict()
+            conversation=None if conversation is None else conversation.get_dict(),
+            reasoning_content=reasoning_content if reasoning_content else None
         )
     if provider is not None:
         chat_completion.provider = provider.name
@@ -168,6 +172,7 @@ async def async_iter_response(
     stop: Optional[list[str]] = None
 ) -> AsyncChatCompletionResponseType:
     content = ""
+    reasoning_content = []
     finish_reason = None
     completion_id = ''.join(random.choices(string.ascii_letters + string.digits, k=28))
     idx = 0
@@ -185,22 +190,25 @@ async def async_iter_response(
                 conversation = chunk
                 continue
             elif isinstance(chunk, ToolCalls):
-                tool_calls = chunk.get_list()
-                continue
+                if not stream:
+                    tool_calls = chunk.get_list()
+                    continue
             elif isinstance(chunk, Usage):
                 usage = chunk
                 continue
             elif isinstance(chunk, ProviderInfo):
                 provider = chunk
                 continue
+            elif isinstance(chunk, Reasoning) and not stream:
+                reasoning_content.append(chunk)
             elif isinstance(chunk, HiddenResponse):
                 continue
             elif isinstance(chunk, Exception):
                 continue
+            elif not chunk:
+                continue
 
             content = add_chunk(content, chunk)
-            if not content:
-                continue
             idx += 1
 
             if max_tokens is not None and idx >= max_tokens:
@@ -241,7 +249,8 @@ async def async_iter_response(
                 **filter_none(
                     tool_calls=[ToolCallModel.model_construct(**tool_call) for tool_call in tool_calls]
                 ) if tool_calls is not None else {},
-                conversation=conversation
+                conversation=conversation,
+                reasoning_content=reasoning_content if reasoning_content else None
             )
         if provider is not None:
             chat_completion.provider = provider.name
@@ -368,7 +377,7 @@ class Completions:
             kwargs["ignore_stream"] = True
 
         response = iter_run_tools(
-            provider.get_create_function(),
+            provider,
             model=model,
             messages=messages,
             stream=stream,
@@ -426,12 +435,10 @@ class Images:
             provider_handler = self.provider
             if provider_handler is None:
                 provider_handler = self.client.models.get(model, default)
-        elif isinstance(provider, str):
-            provider_handler = convert_to_provider(provider)
         else:
             provider_handler = provider
-        if provider_handler is None:
-            return default
+        if isinstance(provider_handler, str):
+            provider_handler = convert_to_provider(provider_handler)
         return provider_handler
 
     async def async_generate(
@@ -455,7 +462,7 @@ class Images:
         if isinstance(provider_handler, IterListProvider):
             for provider in provider_handler.providers:
                 try:
-                    response = await self._generate_image_response(provider, provider.__name__, model, prompt, proxy=proxy, **kwargs)
+                    response = await self._generate_image_response(provider, provider.__name__, model, prompt, proxy=proxy, api_key=api_key, **kwargs)
                     if response is not None:
                         provider_name = provider.__name__
                         break
@@ -472,27 +479,32 @@ class Images:
             response,
             model,
             provider_name,
+            kwargs.get("download_media", True),
             response_format,
             proxy
         )
 
     async def _generate_image_response(
         self,
-        provider_handler,
-        provider_name,
+        provider_handler: ProviderType,
+        provider_name: str,
         model: str,
         prompt: str,
         prompt_prefix: str = "Generate a image: ",
+        api_key: str = None,
         **kwargs
     ) -> MediaResponse:
         messages = [{"role": "user", "content": f"{prompt_prefix}{prompt}"}]
         items: list[MediaResponse] = []
+        if isinstance(api_key, dict):
+            api_key = api_key.get(provider_handler.get_parent())
         if hasattr(provider_handler, "create_async_generator"):
             async for item in provider_handler.create_async_generator(
                 model,
                 messages,
                 stream=True,
                 prompt=prompt,
+                api_key=api_key,
                 **kwargs
             ):
                 if isinstance(item, (MediaResponse, AudioResponse)):
@@ -503,6 +515,7 @@ class Images:
                 messages,
                 True,
                 prompt=prompt,
+                api_key=api_key,
                 **kwargs
             ):
                 if isinstance(item, (MediaResponse, AudioResponse)):
@@ -519,25 +532,35 @@ class Images:
                 urls.extend(item.urls)
         if not urls:
             return None
-        alt = getattr(items[0], "alt", items[0].options.get("text"))
+        alt = getattr(items[0], "alt", "")
         return MediaResponse(urls, alt, items[0].options)
 
     def create_variation(
         self,
         image: ImageType,
+        image_name: str = None,
+        prompt: str = "Create a variation of this image",
         model: str = None,
         provider: Optional[ProviderType] = None,
         response_format: Optional[str] = None,
         **kwargs
     ) -> ImagesResponse:
         return asyncio.run(self.async_create_variation(
-           image, model, provider, response_format, **kwargs
+           image=image,
+           image_name=image_name,
+           prompt=prompt,
+           model=model,
+           provider=provider,
+           response_format=response_format,
+           **kwargs
         ))
 
     async def async_create_variation(
         self,
+        *,
         image: ImageType,
         image_name: str = None,
+        prompt: str = "Create a variation of this image",
         model: Optional[str] = None,
         provider: Optional[ProviderType] = None,
         response_format: Optional[str] = None,
@@ -548,7 +571,6 @@ class Images:
         provider_name = provider_handler.__name__ if hasattr(provider_handler, "__name__") else type(provider_handler).__name__
         if proxy is None:
             proxy = self.client.proxy
-        prompt = "create a variation of this image"
         resolve_media(kwargs, image, image_name)
         error = None
         response = None
@@ -568,13 +590,21 @@ class Images:
             if error is not None:
                 raise error
             raise NoMediaResponseError(f"No media response from {provider_name}")
-        return await self._process_image_response(response, model, provider_name, response_format, proxy)
+        return await self._process_image_response(
+            response,
+            model,
+            provider_name,
+            kwargs.get("download_media", True),
+            response_format,
+            proxy
+        )
 
     async def _process_image_response(
         self,
         response: MediaResponse,
         model: str,
         provider: str,
+        download_media: bool,
         response_format: Optional[str] = None,
         proxy: str = None
     ) -> ImagesResponse:
@@ -597,9 +627,11 @@ class Images:
             images = await asyncio.gather(*[get_b64_from_url(image) for image in response.get_list()])
         else:
             # Save locally for None (default) case
-            images = await copy_media(response.get_list(), response.get("cookies"), response.get("headers"), proxy, response.alt)
+            images = response.get_list()
+            if download_media or response.get("cookies") or response.get("headers"):
+                images = await copy_media(response.get_list(), response.get("cookies"), response.get("headers"), proxy, response.alt)
             images = [Image.model_construct(url=image, revised_prompt=response.alt) for image in images]
-        
+
         return ImagesResponse.model_construct(
             created=int(time.time()),
             data=images,

@@ -19,7 +19,7 @@ RUN if [ "$G4F_VERSION" = "" ] ; then \
 RUN apt-get -qqy update \
   && apt-get -qqy upgrade \
   && apt-get -qyy autoremove \
-  && apt-get -qqy install python3 python-is-python3 pip \
+  && apt-get -qqy install python3 python-is-python3 pip ffmpeg flac \
   && apt-get -qyy remove openjdk-11-jre-headless \
   && apt-get -qyy autoremove \
   && apt-get -qyy clean \
@@ -33,7 +33,7 @@ COPY docker/supervisor-api.conf /etc/supervisor/conf.d/api.conf
 COPY docker/background.png /usr/share/images/fluxbox/ubuntu-light.png
 
 # Add user, fix permissions
-RUN chown "${SEL_UID}:${SEL_GID}" $HOME/.local
+RUN chown "${SEL_UID}:${SEL_GID}" $HOME/.local /opt/venv/share
 
 # Switch user
 USER $SEL_UID

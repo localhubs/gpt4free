@@ -9,11 +9,12 @@ from inspect import signature
 
 from ...errors import VersionNotFoundError, MissingAuthError
 from ...image.copy_images import copy_media, ensure_media_dir, get_media_dir
+from ...image import get_width_height
 from ...tools.run_tools import iter_run_tools
 from ... import Provider
 from ...providers.base_provider import ProviderModelMixin
 from ...providers.retry_provider import BaseRetryProvider
-from ...providers.helper import format_image_prompt
+from ...providers.helper import format_media_prompt
 from ...providers.response import *
 from ... import version, models
 from ... import ChatCompletion, get_model_and_provider
@@ -43,13 +44,13 @@ class Api:
         def get_model_data(provider: ProviderModelMixin, model: str):
             return {
                 "model": model,
-                "label": model.split(":")[-1] if provider.__name__ == "AnyProvider" else model,
+                "label": model.split(":")[-1] if provider.__name__ == "AnyProvider" and not model.startswith("openrouter:") else model,
                 "default": model == provider.default_model,
                 "vision": model in provider.vision_models,
-                "audio": model in provider.audio_models,
+                "audio": False if provider.audio_models is None else model in provider.audio_models,
                 "video": model in provider.video_models,
                 "image": model in provider.image_models,
-                "count": provider.models_count.get(model),
+                "count": False if provider.models_count is None else provider.models_count.get(model),
             }
         if provider in Provider.__map__:
             provider = Provider.__map__[provider]
@@ -93,6 +94,7 @@ class Api:
             "vision": getattr(provider, "default_vision_model", None) is not None,
             "nodriver": getattr(provider, "use_nodriver", False),
             "hf_space": getattr(provider, "hf_space", False),
+            "active_by_default": not provider.needs_auth if provider.active_by_default is None else provider.active_by_default,
             "auth": provider.needs_auth,
             "login_url": getattr(provider, "login_url", None),
         } for provider in Provider.__providers__ if provider.working and safe_get_models(provider)]
@@ -143,28 +145,31 @@ class Api:
             "messages": messages,
             "stream": True,
             "ignore_stream": True,
-            "return_conversation": True,
             **kwargs
         }
 
-    def _create_response_stream(self, kwargs: dict, conversation_id: str, provider: str, download_media: bool = True) -> Iterator:
-        def decorated_log(text: str, file = None):
-            debug.logs.append(text)
+    def _create_response_stream(self, kwargs: dict, provider: str, download_media: bool = True, tempfiles: list[str] = []) -> Iterator:
+        def decorated_log(*values: str, file = None):
+            debug.logs.append(" ".join([str(value) for value in values]))
             if debug.logging:
-                debug.log_handler(text, file=file)
-        debug.log = decorated_log
+                debug.log_handler(*values, file=file)
+        if "user" not in kwargs:
+            debug.log = decorated_log
         proxy = os.environ.get("G4F_PROXY")
-        provider = kwargs.get("provider")
+        provider = kwargs.pop("provider", None)
         try:
             model, provider_handler = get_model_and_provider(
                 kwargs.get("model"), provider,
                 stream=True,
                 ignore_stream=True,
-                logging=False,
                 has_images="media" in kwargs,
             )
+            if "user" in kwargs:
+                debug.error("User:", kwargs.get("user", "Unknown"))
+                debug.error("Referrer:", kwargs.get("referer", ""))
+                debug.error("User-Agent:", kwargs.get("user-agent", ""))
         except Exception as e:
-            debug.error(e)
+            logger.exception(e)
             yield self._format_json('error', type(e).__name__, message=get_error_message(e))
             return
         if not isinstance(provider_handler, BaseRetryProvider):
@@ -174,16 +179,13 @@ class Api:
             if hasattr(provider_handler, "get_parameters"):
                 yield self._format_json("parameters", provider_handler.get_parameters(as_json=True))
         try:
-            result = iter_run_tools(ChatCompletion.create, **{**kwargs, "model": model, "provider": provider_handler, "download_media": download_media})
+            result = iter_run_tools(provider_handler, **{**kwargs, "model": model, "download_media": download_media})
             for chunk in result:
                 if isinstance(chunk, ProviderInfo):
                     yield self.handle_provider(chunk, model)
-                    provider = chunk.name
                 elif isinstance(chunk, JsonConversation):
                     if provider is not None:
-                        if hasattr(provider, "__name__"):
-                            provider = provider.__name__
-                        yield self._format_json("conversation", {
+                        yield self._format_json("conversation", chunk.get_dict() if provider == "AnyProvider" else {
                             provider: chunk.get_dict()
                         })
                 elif isinstance(chunk, Exception):
@@ -198,11 +200,21 @@ class Api:
                 elif isinstance(chunk, MediaResponse):
                     media = chunk
                     if download_media or chunk.get("cookies"):
-                        chunk.alt = format_image_prompt(kwargs.get("messages"), chunk.alt)
-                        tags = [model, kwargs.get("aspect_ratio"), kwargs.get("resolution"), kwargs.get("width"), kwargs.get("height")]
-                        media = asyncio.run(copy_media(chunk.get_list(), chunk.get("cookies"), chunk.get("headers"), proxy=proxy, alt=chunk.alt, tags=tags))
+                        chunk.alt = format_media_prompt(kwargs.get("messages"), chunk.alt)
+                        width, height = get_width_height(chunk.get("width"), chunk.get("height"))
+                        tags = [model, kwargs.get("aspect_ratio"), kwargs.get("resolution")]
+                        media = asyncio.run(copy_media(
+                            chunk.get_list(),
+                            chunk.get("cookies"),
+                            chunk.get("headers"),
+                            proxy=proxy,
+                            alt=chunk.alt,
+                            tags=tags,
+                            add_url=f"width={width}&height={height}&",
+                            timeout=kwargs.get("timeout"),
+                        ))
                         media = ImageResponse(media, chunk.alt) if isinstance(chunk, ImageResponse) else VideoResponse(media, chunk.alt)
-                    yield self._format_json("content", str(media), urls=chunk.urls, alt=chunk.alt)
+                    yield self._format_json("content", str(media), urls=media.urls, alt=media.alt)
                 elif isinstance(chunk, SynthesizeData):
                     yield self._format_json("synthesize", chunk.get_dict())
                 elif isinstance(chunk, TitleGeneration):
@@ -225,17 +237,30 @@ class Api:
                     yield self._format_json("suggestions", chunk.suggestions)
                 elif isinstance(chunk, DebugResponse):
                     yield self._format_json("log", chunk.log)
+                elif isinstance(chunk, ContinueResponse):
+                    yield self._format_json("continue", chunk.log)
                 elif isinstance(chunk, RawResponse):
                     yield self._format_json(chunk.type, **chunk.get_dict())
                 else:
                     yield self._format_json("content", str(chunk))
         except MissingAuthError as e:
             yield self._format_json('auth', type(e).__name__, message=get_error_message(e))
+        except (TimeoutError, asyncio.exceptions.CancelledError) as e:
+            if "user" in kwargs:
+                debug.error(e, "User:", kwargs.get("user", "Unknown"))
+            yield self._format_json('error', type(e).__name__, message=get_error_message(e))
         except Exception as e:
+            if "user" in kwargs:
+                debug.error(e, "User:", kwargs.get("user", "Unknown"))
             logger.exception(e)
             yield self._format_json('error', type(e).__name__, message=get_error_message(e))
         finally:
             yield from self._yield_logs()
+            for tempfile in tempfiles:
+                try:
+                    os.remove(tempfile)
+                except Exception as e:
+                    logger.exception(e)
 
     def _yield_logs(self):
         if debug.logs:
@@ -256,9 +281,7 @@ class Api:
         }
 
     def handle_provider(self, provider_handler, model):
-        if isinstance(provider_handler, BaseRetryProvider) and provider_handler.last_provider is not None:
-            provider_handler = provider_handler.last_provider
-        if model:
+        if not getattr(provider_handler, "model", False):
             return self._format_json("provider", {**provider_handler.get_dict(), "model": model})
         return self._format_json("provider", provider_handler.get_dict())
 
