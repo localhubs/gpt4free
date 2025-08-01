@@ -9,10 +9,10 @@ from ..image import is_data_an_audio
 from ..providers.retry_provider import IterListProvider
 from ..Provider.needs_auth import OpenaiChat, CopilotAccount
 from ..Provider.hf_space import HuggingSpace
-from ..Provider import Cloudflare, Gemini, GeminiPro, Grok, DeepSeekAPI, PerplexityLabs, LambdaChat, PollinationsAI, PuterJS
-from ..Provider import Microsoft_Phi_4_Multimodal, DeepInfraChat, Blackbox, OIVSCodeSer2, OIVSCodeSer0501, TeachAnything
-from ..Provider import Together, WeWordle, Yqcloud, Chatai, Free2GPT, ImageLabs, LegacyLMArena, LMArenaBeta
-from ..Provider import EdgeTTS, gTTS, MarkItDown, OpenAIFM, Video
+from ..Provider import Copilot, Cloudflare, Gemini, GeminiPro, Grok, DeepSeekAPI, PerplexityLabs, LambdaChat, PollinationsAI, PuterJS
+from ..Provider import Microsoft_Phi_4_Multimodal, DeepInfraChat, Blackbox, OIVSCodeSer0501, OIVSCodeSer2, TeachAnything, OperaAria, Startnest
+from ..Provider import WeWordle, Yqcloud, Chatai, ImageLabs, LegacyLMArena, LMArenaBeta, Free2GPT
+from ..Provider import EdgeTTS, gTTS, MarkItDown, OpenAIFM
 from ..Provider import HarProvider, HuggingFace, HuggingFaceMedia
 from .base_provider import AsyncGeneratorProvider, ProviderModelMixin
 from .. import Provider
@@ -25,16 +25,16 @@ PROVIERS_LIST_1 = [
     OIVSCodeSer2, OIVSCodeSer0501, TeachAnything, WeWordle, Yqcloud, Chatai, Free2GPT, ImageLabs,
     # Has lazy loading model lists
     PollinationsAI, HarProvider, LegacyLMArena, LMArenaBeta, LambdaChat, DeepInfraChat,
-    HuggingSpace, HuggingFace, HuggingFaceMedia, GeminiPro, Together, PuterJS
+    HuggingSpace, HuggingFace, HuggingFaceMedia, GeminiPro, PuterJS, OperaAria, Startnest
 ]
 
 PROVIERS_LIST_2 = [
-    OpenaiChat, CopilotAccount, PollinationsAI, PerplexityLabs, Gemini, Grok
+    OpenaiChat, Copilot, CopilotAccount, PollinationsAI, PerplexityLabs, Gemini, Grok
 ]
 
 PROVIERS_LIST_3 = [
     HarProvider, LambdaChat, DeepInfraChat, HuggingFace, HuggingFaceMedia, LegacyLMArena, LMArenaBeta,
-    PuterJS, Together, Cloudflare, HuggingSpace
+    PuterJS, Cloudflare, HuggingSpace
 ]
 
 LABELS = {
@@ -129,7 +129,7 @@ class AnyModelProviderMixin(ProviderModelMixin):
             if not provider.working:
                 continue
             try:
-                if provider == CopilotAccount:
+                if provider in [Copilot, CopilotAccount]:
                     for model in provider.model_aliases.keys():
                         if model not in cls.model_map:
                             cls.model_map[model] = {}
@@ -342,6 +342,7 @@ class AnyModelProviderMixin(ProviderModelMixin):
 
 class AnyProvider(AsyncGeneratorProvider, AnyModelProviderMixin):
     working = True
+    active_by_default = True
 
     @classmethod
     async def create_async_generator(

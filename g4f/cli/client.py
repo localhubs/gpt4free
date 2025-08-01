@@ -16,7 +16,12 @@ from g4f.Provider import ProviderUtils
 from g4f.image import extract_data_uri, is_accepted_format
 from g4f.image.copy_images import get_media_dir
 from g4f.client.helper import filter_markdown
-from g4f.integration.markitdown import MarkItDown
+from g4f.errors import MissingRequirementsError
+try:
+    from g4f.integration.markitdown import MarkItDown
+    has_markitdown = True
+except ImportError:
+    has_markitdown = False
 from g4f.config import CONFIG_DIR, COOKIES_DIR
 from g4f import debug
 
@@ -31,6 +36,7 @@ class ConversationManager:
         self.provider: Optional[str] = provider
         self.conversation = None
         self.history: List[Dict[str, str]] = []
+        self.data: Dict = {}
         self._load()
 
     def _load(self) -> None:
@@ -121,16 +127,13 @@ async def stream_response(
         if is_content(token):
             response_content.append(token)
         try:
-            for byte in str(token).encode('utf-8'):
-                sys.stdout.buffer.write(bytes([byte]))
-                sys.stdout.buffer.flush()
-                await asyncio.sleep(0.01)
+            print(token, end="", flush=True)
         except (IOError, BrokenPipeError) as e:
             print(f"\nError writing to stdout: {e}", file=sys.stderr)
             break
     print("\n", end="")
 
-    conversation.conversation = None if last_chunk is None else last_chunk.conversation
+    conversation.conversation = getattr(last_chunk, "conversation", conversation.conversation)
     media_content = next(iter([chunk for chunk in response_content if isinstance(chunk, MediaResponse)]), None)
     response_content = response_content[0] if len(response_content) == 1 else "".join([str(chunk) for chunk in response_content])
     if output_file:
@@ -201,7 +204,6 @@ def get_parser():
         default=None,
         type=Path,
         metavar='FILE',
-        nargs='?',
         help="Output file to save the response file."
     )
     parser.add_argument(
@@ -218,6 +220,7 @@ def get_parser():
     parser.add_argument(
         '--conversation-file',
         type=Path,
+        metavar='FILE',
         default=CONVERSATION_FILE,
         help="File to store/load conversation state"
     )
@@ -227,14 +230,14 @@ def get_parser():
         help="Clear conversation history before starting"
     )
     parser.add_argument(
-        '--no-config',
+        '-N', '--no-config',
         action='store_true',
         help="Do not load configuration from conversation file"
     )
     parser.add_argument(
         'input',
         nargs='*',
-        help="Input text (or read from stdin)"
+        help="Input urls, files and text (or read from stdin)"
     )
     
     return parser
@@ -286,6 +289,8 @@ def run_client_args(args):
                 media.append(input_value)
             else:
                 try:
+                    if not has_markitdown:
+                        raise MissingRequirementsError("MarkItDown is not installed. Install it with `pip install -U markitdown`.")
                     md = MarkItDown()
                     text_content = md.convert_url(input_value).text_content
                     input_text += f"\n```\n{text_content}\n\nSource: {input_value}\n```\n"

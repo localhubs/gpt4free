@@ -1,4 +1,5 @@
 from .Anthropic         import Anthropic
+from .Azure             import Azure
 from .BingCreateImages  import BingCreateImages
 from .BlackboxPro       import BlackboxPro
 from .CablyAI           import CablyAI
@@ -32,6 +33,7 @@ from .Reka              import Reka
 from .Replicate         import Replicate
 from .ThebApi           import ThebApi
 from .WhiteRabbitNeo    import WhiteRabbitNeo
+from .Together          import Together
 from .Video             import Video
 from .xAI               import xAI
 from .You               import You
